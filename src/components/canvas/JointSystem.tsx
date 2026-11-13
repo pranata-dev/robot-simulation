@@ -1,7 +1,6 @@
 'use client';
 
-import { type RefObject, useEffect, useMemo } from 'react';
-import * as THREE from 'three';
+import { type RefObject, useEffect, useRef } from 'react';
 import { useFrame } from '@react-three/fiber';
 import {
   type RapierRigidBody,
@@ -9,49 +8,65 @@ import {
   useRapier,
   useRevoluteJoint,
 } from '@react-three/rapier';
-import { SOCKETS_BY_PART } from '@/lib/constants/socketRegistry';
+import {
+  resolveJointConstraintSpec,
+  syncRigidBodyToWorldTransform,
+} from '@/lib/physics/jointConstraints';
+import { stepServoMotorSlewAndTraction } from '@/lib/physics/servoMotorControl';
 import { useSimulationStore } from '@/store/useSimulationStore';
-import type { Vector3Tuple } from '@/types/simulator';
-
-const IDENTITY_QUAT: [number, number, number, number] = [0, 0, 0, 1];
-const ZERO_ANCHOR: Vector3Tuple = [0, 0, 0];
-const DEFAULT_REVOLUTE_AXIS: Vector3Tuple = [0, 1, 0];
-
-/** High Rapier motor PD gains so dynamic servo-leg joints behave like rigid metal gears without sagging. */
-const MOTOR_STIFFNESS = 500000;
-const MOTOR_DAMPING = 20000;
+import type { QuaternionTuple, Vector3Tuple, WorkspacePart } from '@/types/simulator';
 
 type NonNullBodyRef = RefObject<RapierRigidBody>;
+
+interface PreJointPoseSyncProps {
+  workspaceParts: readonly WorkspacePart[];
+  rigidBodyRefs: Readonly<Record<string, RefObject<RapierRigidBody | null>>>;
+}
+
+/**
+ * Ensures every Rapier RigidBody matches its snapped snapLogic world position and
+ * quaternion before Fixed/Revolute joints attach on frame 1 of playback.
+ */
+function PreJointPoseSync({ workspaceParts, rigidBodyRefs }: PreJointPoseSyncProps) {
+  const { world } = useRapier();
+
+  useEffect(() => {
+    for (const part of workspaceParts) {
+      syncRigidBodyToWorldTransform(rigidBodyRefs[part.id]?.current, part.position, part.rotation);
+    }
+    try {
+      world.propagateModifiedBodyPositionsToColliders();
+    } catch {
+      // Ignore Rapier world teardown while resetting scene bodies.
+    }
+  }, [rigidBodyRefs, workspaceParts, world]);
+
+  return null;
+}
 
 interface FixedAttachmentJointProps {
   parentRef: RefObject<RapierRigidBody | null>;
   childRef: RefObject<RapierRigidBody | null>;
-  anchor: Vector3Tuple;
-  parentRotation: Vector3Tuple;
+  anchorA: Vector3Tuple;
+  frameA: QuaternionTuple;
+  anchorB: Vector3Tuple;
+  frameB: QuaternionTuple;
 }
 
 function FixedAttachmentJoint({
   parentRef,
   childRef,
-  anchor,
-  parentRotation,
+  anchorA,
+  frameA,
+  anchorB,
+  frameB,
 }: FixedAttachmentJointProps) {
-  const parentQuat = useMemo<[number, number, number, number]>(() => {
-    const q = new THREE.Quaternion().setFromEuler(
-      new THREE.Euler(parentRotation[0], parentRotation[1], parentRotation[2]),
-    );
-    return [q.x, q.y, q.z, q.w];
-  }, [parentRotation]);
-
-  const joint = useFixedJoint(
-    parentRef as NonNullBodyRef,
-    childRef as NonNullBodyRef,
-    [anchor, parentQuat, ZERO_ANCHOR, IDENTITY_QUAT],
-  );
-
-  useEffect(() => {
-    joint.current?.setContactsEnabled(false);
-  }, [joint]);
+  useFixedJoint(parentRef as NonNullBodyRef, childRef as NonNullBodyRef, [
+    anchorA,
+    frameA,
+    anchorB,
+    frameB,
+  ]);
 
   return null;
 }
@@ -60,7 +75,9 @@ interface RevoluteMotorJointProps {
   servoId: string;
   parentRef: RefObject<RapierRigidBody | null>;
   childRef: RefObject<RapierRigidBody | null>;
-  anchor: Vector3Tuple;
+  chassisRef?: RefObject<RapierRigidBody | null>;
+  anchorA: Vector3Tuple;
+  anchorB: Vector3Tuple;
   axis: Vector3Tuple;
 }
 
@@ -68,39 +85,43 @@ function RevoluteMotorJoint({
   servoId,
   parentRef,
   childRef,
-  anchor,
+  chassisRef,
+  anchorA,
+  anchorB,
   axis,
 }: RevoluteMotorJointProps) {
-  const { rapier } = useRapier();
+  const { rapier, world } = useRapier();
   const simulationStatus = useSimulationStore((state) => state.simulationStatus);
-  const targetAngleDeg = useSimulationStore((state) => state.servoAngles[servoId] ?? 0);
+  const currentAngleRadRef = useRef<number>(0);
 
-  const joint = useRevoluteJoint(
-    parentRef as NonNullBodyRef,
-    childRef as NonNullBodyRef,
-    [anchor, ZERO_ANCHOR, axis],
-  );
+  const joint = useRevoluteJoint(parentRef as NonNullBodyRef, childRef as NonNullBodyRef, [
+    anchorA,
+    anchorB,
+    axis,
+  ]);
 
   useEffect(() => {
-    const revoluteJoint = joint.current;
-    if (!revoluteJoint) return;
-
-    revoluteJoint.setContactsEnabled(false);
-    revoluteJoint.configureMotorModel(rapier.MotorModel.AccelerationBased);
-
-    const activeAngleDeg = simulationStatus === 'playing' ? targetAngleDeg : 0;
-    const angleInRadians = (activeAngleDeg * Math.PI) / 180;
-    revoluteJoint.configureMotorPosition(angleInRadians, MOTOR_STIFFNESS, MOTOR_DAMPING);
-
-    parentRef.current?.wakeUp();
-    childRef.current?.wakeUp();
-  }, [childRef, joint, parentRef, rapier, simulationStatus, targetAngleDeg]);
-
-  useFrame(() => {
-    if (simulationStatus === 'playing') {
-      parentRef.current?.wakeUp();
-      childRef.current?.wakeUp();
+    if (simulationStatus !== 'playing') {
+      currentAngleRadRef.current = 0;
     }
+  }, [simulationStatus]);
+
+  useFrame((_, delta) => {
+    const revoluteJoint = joint.current;
+    if (simulationStatus !== 'playing' || !revoluteJoint) return;
+
+    const targetDeg = useSimulationStore.getState().servoTargetAngles[servoId] ?? 0;
+    currentAngleRadRef.current = stepServoMotorSlewAndTraction({
+      rapier,
+      world,
+      revoluteJoint,
+      currentAngleRad: currentAngleRadRef.current,
+      targetAngleDeg: targetDeg,
+      delta,
+      parentBody: parentRef.current,
+      childBody: childRef.current,
+      chassisBody: chassisRef?.current,
+    });
   });
 
   return null;
@@ -108,15 +129,22 @@ function RevoluteMotorJoint({
 
 /**
  * Instantiates Rapier Fixed and Revolute impulse joints across all snapped workspaceParts
- * inside <Physics> and drives revolute leg joints natively via configureMotorPosition.
+ * strictly during active simulation playback after RigidBody poses match snapLogic transforms.
  */
 export default function JointSystem() {
+  const simulationStatus = useSimulationStore((state) => state.simulationStatus);
   const workspaceParts = useSimulationStore((state) => state.workspaceParts);
   const rigidBodyRefs = useSimulationStore((state) => state.rigidBodyRefs);
+
+  if (simulationStatus !== 'playing') {
+    return null;
+  }
+
   const partsById = new Map(workspaceParts.map((part) => [part.id, part]));
 
   return (
     <>
+      <PreJointPoseSync workspaceParts={workspaceParts} rigidBodyRefs={rigidBodyRefs} />
       {workspaceParts.map((child) => {
         if (!child.attachedTo || !child.socketId) return null;
 
@@ -127,35 +155,39 @@ export default function JointSystem() {
         const childRef = rigidBodyRefs[child.id];
         if (!parentRef || !childRef) return null;
 
-        const socket = SOCKETS_BY_PART[parent.type].find((entry) => entry.id === child.socketId);
-        if (!socket) return null;
+        const spec = resolveJointConstraintSpec(parent, child);
+        if (!spec) return null;
 
-        const jointKey = `${child.id}:${parent.id}:${socket.id}`;
+        if (spec.kind === 'REVOLUTE') {
+          const chassisId = parent.attachedTo;
+          const chassisRef = chassisId ? rigidBodyRefs[chassisId] : undefined;
 
-        if (child.type === 'LEG_TIBIA' && parent.type === 'SERVO_MG90S') {
           return (
             <RevoluteMotorJoint
-              key={jointKey}
+              key={spec.key}
               servoId={parent.id}
               parentRef={parentRef}
               childRef={childRef}
-              anchor={socket.position}
-              axis={socket.jointAxis ?? DEFAULT_REVOLUTE_AXIS}
+              chassisRef={chassisRef}
+              anchorA={spec.anchorA}
+              anchorB={spec.anchorB}
+              axis={spec.axis}
             />
           );
         }
 
         return (
           <FixedAttachmentJoint
-            key={jointKey}
+            key={spec.key}
             parentRef={parentRef}
             childRef={childRef}
-            anchor={socket.position}
-            parentRotation={socket.rotation}
+            anchorA={spec.anchorA}
+            frameA={spec.frameA}
+            anchorB={spec.anchorB}
+            frameB={spec.frameB}
           />
         );
       })}
     </>
   );
 }
-

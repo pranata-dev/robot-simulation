@@ -1,6 +1,7 @@
 import type { RefObject } from 'react';
 import type { RapierRigidBody } from '@react-three/rapier';
 import type * as THREE from 'three';
+import { isValidRigidBody } from '@/lib/physics/servoMotorControl';
 
 const rigidBodyByPartId = new Map<string, RapierRigidBody>();
 const servoHornRefByPartId = new Map<string, RefObject<THREE.Object3D | null>>();
@@ -29,6 +30,7 @@ export function getAllRegisteredRigidBodies(): Array<[string, RapierRigidBody]> 
  */
 export function resetAllRigidBodiesPhysicsState(): void {
   for (const [, body] of rigidBodyByPartId) {
+    if (!isValidRigidBody(body)) continue;
     try {
       body.setLinvel({ x: 0, y: 0, z: 0 }, true);
       body.setAngvel({ x: 0, y: 0, z: 0 }, true);
