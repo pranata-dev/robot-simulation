@@ -20,6 +20,24 @@ export function getPartRigidBody(partId: string): RapierRigidBody | undefined {
   return rigidBodyByPartId.get(partId);
 }
 
+export function getAllRegisteredRigidBodies(): Array<[string, RapierRigidBody]> {
+  return Array.from(rigidBodyByPartId.entries());
+}
+
+/**
+ * Clears linear and angular velocities across all registered Rapier RigidBody instances.
+ */
+export function resetAllRigidBodiesPhysicsState(): void {
+  for (const [, body] of rigidBodyByPartId) {
+    try {
+      body.setLinvel({ x: 0, y: 0, z: 0 }, true);
+      body.setAngvel({ x: 0, y: 0, z: 0 }, true);
+    } catch {
+      // Ignore bodies that were already removed from the Rapier world during unmount.
+    }
+  }
+}
+
 export function registerServoHornRef(
   servoId: string,
   hornRef: RefObject<THREE.Object3D | null>,
@@ -34,6 +52,12 @@ export function unregisterServoHornRef(
   if (!hornRef || servoHornRefByPartId.get(servoId) === hornRef) {
     servoHornRefByPartId.delete(servoId);
   }
+}
+
+export function clearPhysicsRegistry(): void {
+  rigidBodyByPartId.clear();
+  servoHornRefByPartId.clear();
+  draggingPartIds.clear();
 }
 
 export function getServoHornRef(servoId: string): RefObject<THREE.Object3D | null> | undefined {
@@ -51,4 +75,3 @@ export function setPartDragging(partId: string, isDragging: boolean): void {
 export function isPartDragging(partId: string): boolean {
   return draggingPartIds.has(partId);
 }
-

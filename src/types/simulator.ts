@@ -127,3 +127,109 @@ export type NewWireConnection = Omit<WireConnection, 'id' | 'color'> & {
   color?: string;
 };
 
+export interface PartSelectionBounds {
+  center: Vector3Tuple;
+  size: Vector3Tuple;
+}
+
+export type QuaternionTuple = [number, number, number, number];
+
+export type PinNodeKey = `${string}:${PinId}`;
+
+export type CircuitFaultKind =
+  | 'SHORT_CIRCUIT'
+  | 'ROLE_MISMATCH'
+  | 'MISSING_POWER'
+  | 'MISSING_GROUND'
+  | 'MISSING_PWM';
+
+export interface CircuitDiagnosticIssue {
+  id: string;
+  kind: CircuitFaultKind;
+  message: string;
+  pinKeys: readonly PinNodeKey[];
+}
+
+export interface WiringValidationResult {
+  isValid: boolean;
+  hasShortCircuit: boolean;
+  issues: readonly CircuitDiagnosticIssue[];
+  faultyPinKeys: Readonly<Record<string, CircuitFaultKind>>;
+}
+
+export type WorkerLogLevel = 'info' | 'warn' | 'error';
+
+export interface ScriptConsoleEntry {
+  id: string;
+  level: WorkerLogLevel;
+  message: string;
+  timestamp: number;
+}
+
+export type WorkerInboundMessage =
+  | {
+      type: 'START';
+      runId: number;
+      script: string;
+    }
+  | {
+      type: 'STOP';
+    };
+
+export type WorkerOutboundMessage =
+  | {
+      type: 'HEARTBEAT';
+      runId: number;
+    }
+  | {
+      type: 'SET_SERVO_ANGLE';
+      runId: number;
+      servoTarget: string;
+      angleDeg: number;
+    }
+  | {
+      type: 'LOG';
+      runId: number;
+      level: WorkerLogLevel;
+      message: string;
+    }
+  | {
+      type: 'COMPLETED';
+      runId: number;
+    }
+  | {
+      type: 'ERROR';
+      runId: number;
+      message: string;
+    };
+
+export const SIMULATION_SCHEMA_VERSION = '1.0.0' as const;
+
+export type SimulationSchemaVersion = typeof SIMULATION_SCHEMA_VERSION;
+
+export type ChallengeStatus = 'idle' | 'in_progress' | 'completed' | 'failed';
+
+export interface ChallengeMetrics {
+  completionTimeMs: number;
+  obstacleHits: number;
+}
+
+export interface SnapshotImportResult {
+  success: boolean;
+  error?: string;
+}
+
+export interface SimulationSnapshot {
+  schemaVersion: SimulationSchemaVersion;
+  workspaceParts: WorkspacePart[];
+  wires: WireConnection[];
+  script: string;
+  theme?: ThemeMode;
+}
+
+export interface SimulationEmbedConfig {
+  allowedParts?: PartType[] | null;
+  readOnly?: boolean;
+  zeroCollisionMode?: boolean;
+}
+

@@ -77,6 +77,19 @@ export const PART_CATALOG: Readonly<Record<PartType, PartCatalogEntry>> = {
   },
 };
 
+/** Unified chassis grounding & assembly stand geometry constants (derived from PART_CATALOG). */
+export const CHASSIS_DIMENSIONS: Vector3Tuple = PART_CATALOG.CHASSIS_BASE.dimensions;
+export const CHASSIS_HALF_WIDTH = CHASSIS_DIMENSIONS[0] / 2;
+export const CHASSIS_HALF_HEIGHT = CHASSIS_DIMENSIONS[1] / 2;
+export const CHASSIS_HALF_DEPTH = CHASSIS_DIMENSIONS[2] / 2;
+export const CHASSIS_COLLIDER_HALF_EXTENTS: Vector3Tuple = [
+  CHASSIS_HALF_WIDTH,
+  CHASSIS_HALF_HEIGHT,
+  CHASSIS_HALF_DEPTH,
+];
+/** Elevated working Y position during idle assembly when at least one leg is attached. */
+export const CHASSIS_ASSEMBLY_WORKING_Y = 0.5;
+
 /** Quadruped 8-DOF bill of materials plus high-quantity sandbox course items. */
 export const SPIDER_BILL_OF_MATERIALS: Readonly<Record<PartType, number>> = {
   CHASSIS_BASE: 1,

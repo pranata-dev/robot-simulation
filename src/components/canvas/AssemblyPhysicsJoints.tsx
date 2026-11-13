@@ -1,25 +1,38 @@
 'use client';
 
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import * as THREE from 'three';
+import type { ImpulseJoint } from '@dimforge/rapier3d-compat';
 import { useRapier } from '@react-three/rapier';
 import { SOCKETS_BY_PART } from '@/lib/constants/socketRegistry';
 import { getPartRigidBody } from '@/lib/physics/rigidBodyRegistry';
 import { useSimulationStore } from '@/store/useSimulationStore';
 
 /**
- * Instantiates Rapier Fixed impulse joints across rigidly mounted parts (MCU & servos on chassis)
- * when playing; attached legs are driven via kinematicPosition tracking in SpiderLegProxy.
+ * Instantiates Rapier Fixed impulse joints across rigidly mounted parts when playing
+ * and cleans up all joint handles deterministically across repeated play/stop cycles.
  */
 export default function AssemblyPhysicsJoints() {
   const { rapier, world } = useRapier();
   const isPlaying = useSimulationStore((state) => state.simulationStatus === 'playing');
   const workspaceParts = useSimulationStore((state) => state.workspaceParts);
+  const activeJointsRef = useRef<Map<string, ImpulseJoint>>(new Map());
 
   useEffect(() => {
-    if (!isPlaying) return;
+    const activeJoints = activeJointsRef.current;
 
-    const createdJoints: ReturnType<typeof world.createImpulseJoint>[] = [];
+    const cleanupJoints = () => {
+      for (const [, joint] of activeJoints) {
+        if (world.getImpulseJoint(joint.handle)) {
+          world.removeImpulseJoint(joint, true);
+        }
+      }
+      activeJoints.clear();
+    };
+
+    cleanupJoints();
+    if (!isPlaying) return cleanupJoints;
+
     const partsById = new Map(workspaceParts.map((part) => [part.id, part]));
     const tempEuler = new THREE.Euler();
     const tempQuat = new THREE.Quaternion();
@@ -33,14 +46,18 @@ export default function AssemblyPhysicsJoints() {
       const socket = SOCKETS_BY_PART[parent.type].find((entry) => entry.id === child.socketId);
       if (!socket || socket.jointKind !== 'FIXED') continue;
 
+      const jointKey = `${child.id}:${parent.id}:${socket.id}`;
+      if (activeJoints.has(jointKey)) continue;
+
       const parentBody = getPartRigidBody(parent.id);
       const childBody = getPartRigidBody(child.id);
       if (!parentBody || !childBody) continue;
+      if (!world.getRigidBody(parentBody.handle) || !world.getRigidBody(childBody.handle)) continue;
 
       parentBody.setBodyType(rapier.RigidBodyType.Dynamic, true);
       childBody.setBodyType(rapier.RigidBodyType.Dynamic, true);
 
-      tempEuler.set(socket.rotation[0], socket.rotation[1], socket.rotation[2]);
+      tempEuler.set(socket.rotation[0], socket.rotation[1], socket.rotation[2], 'XYZ');
       tempQuat.setFromEuler(tempEuler);
 
       const jointData = rapier.JointData.fixed(
@@ -51,16 +68,10 @@ export default function AssemblyPhysicsJoints() {
       );
       const joint = world.createImpulseJoint(jointData, parentBody, childBody, true);
       joint.setContactsEnabled(false);
-      createdJoints.push(joint);
+      activeJoints.set(jointKey, joint);
     }
 
-    return () => {
-      for (const joint of createdJoints) {
-        if (world.getImpulseJoint(joint.handle)) {
-          world.removeImpulseJoint(joint, true);
-        }
-      }
-    };
+    return cleanupJoints;
   }, [isPlaying, rapier, workspaceParts, world]);
 
   return null;
