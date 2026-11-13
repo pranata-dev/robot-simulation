@@ -6,6 +6,7 @@ import type {
   PinId,
   PinNodeKey,
   WireConnection,
+  WiringMode,
   WiringValidationResult,
   WorkspacePart,
 } from '@/types/simulator';
@@ -23,6 +24,8 @@ interface ElectricalNet {
   hasPwm: boolean;
   hasShortCircuit: boolean;
   hasRoleMismatch: boolean;
+  espGpioEndpoints: NetEndpoint[];
+  hasGpioConflict: boolean;
 }
 
 export function makePinNodeKey(partId: string, pinId: PinId): PinNodeKey {
@@ -51,12 +54,16 @@ function addFaultIfUnset(
 function buildElectricalNets(
   partsById: ReadonlyMap<string, WorkspacePart>,
   wires: readonly WireConnection[],
+  wiringMode: WiringMode,
 ): {
   netByKey: Map<PinNodeKey, ElectricalNet>;
   nets: ElectricalNet[];
 } {
   const adjacency = new Map<PinNodeKey, Set<PinNodeKey>>();
   const endpointByKey = new Map<PinNodeKey, NetEndpoint>();
+
+  const isPowerOrGroundServoPin = (partType: WorkspacePart['type'], pinId: PinId): boolean =>
+    partType === 'SERVO_MG90S' && (pinId === 'SERVO_VCC' || pinId === 'SERVO_GND');
 
   const registerEndpoint = (partId: string, pinId: PinId): PinNodeKey | null => {
     const part = partsById.get(partId);
@@ -75,6 +82,16 @@ function buildElectricalNets(
   };
 
   for (const wire of wires) {
+    const fromPart = partsById.get(wire.fromPartId);
+    const toPart = partsById.get(wire.toPartId);
+    if (
+      wiringMode === '1-wire' &&
+      ((fromPart && isPowerOrGroundServoPin(fromPart.type, wire.fromPinId)) ||
+        (toPart && isPowerOrGroundServoPin(toPart.type, wire.toPinId)))
+    ) {
+      continue;
+    }
+
     const fromKey = registerEndpoint(wire.fromPartId, wire.fromPinId);
     const toKey = registerEndpoint(wire.toPartId, wire.toPinId);
     if (!fromKey || !toKey) continue;
@@ -112,7 +129,11 @@ function buildElectricalNets(
     const hasGround = endpoints.some((e) => e.pin.role === 'GROUND');
     const hasPwm = endpoints.some((e) => e.pin.role === 'PWM');
     const hasShortCircuit = hasPower && hasGround;
-    const hasRoleMismatch = !hasShortCircuit && hasPwm && (hasPower || hasGround);
+    const espGpioEndpoints = endpoints.filter(
+      (e) => e.part.type === 'ESP32_DEVKIT' && e.pin.role === 'PWM' && e.pin.gpio !== null,
+    );
+    const hasGpioConflict = espGpioEndpoints.length > 1;
+    const hasRoleMismatch = (!hasShortCircuit && hasPwm && (hasPower || hasGround)) || hasGpioConflict;
 
     const net: ElectricalNet = {
       endpoints,
@@ -121,6 +142,8 @@ function buildElectricalNets(
       hasPwm,
       hasShortCircuit,
       hasRoleMismatch,
+      espGpioEndpoints,
+      hasGpioConflict,
     };
 
     nets.push(net);
@@ -134,14 +157,15 @@ function buildElectricalNets(
 
 /**
  * Validates all jumper wire nets for short circuits, role mismatches, and incomplete
- * VCC/GND/PWM paths across attached ESP32 and Servo components.
+ * VCC/GND/PWM paths across attached ESP32 and Servo components under the active wiringMode.
  */
 export function validateWiringTopology(
   workspaceParts: readonly WorkspacePart[],
   wires: readonly WireConnection[],
+  wiringMode: WiringMode = '3-pin',
 ): WiringValidationResult {
   const partsById = new Map(workspaceParts.map((part) => [part.id, part]));
-  const { netByKey, nets } = buildElectricalNets(partsById, wires);
+  const { netByKey, nets } = buildElectricalNets(partsById, wires, wiringMode);
 
   const issues: CircuitDiagnosticIssue[] = [];
   const faultyPinKeys: Record<string, CircuitFaultKind> = {};
@@ -165,6 +189,17 @@ export function validateWiringTopology(
           powerPin && groundPin
             ? `Short circuit: ${formatEndpointLabel(powerPin)} is bridged to ${formatEndpointLabel(groundPin)}.`
             : 'Short circuit detected between power rail (VCC/5V) and GND.',
+        pinKeys: netKeys,
+      });
+    } else if (net.hasGpioConflict) {
+      for (const key of netKeys) {
+        faultyPinKeys[key] = 'ROLE_MISMATCH';
+      }
+      const gpioLabels = net.espGpioEndpoints.map((e) => e.pin.label).join(' & ');
+      issues.push({
+        id: `gpio-conflict-${netIndex}`,
+        kind: 'ROLE_MISMATCH',
+        message: `GPIO conflict: Multiple ESP32 PWM pins (${gpioLabels}) cannot be bridged on one net.`,
         pinKeys: netKeys,
       });
     } else if (net.hasRoleMismatch) {
@@ -192,42 +227,47 @@ export function validateWiringTopology(
     (part) => part.type === 'SERVO_MG90S' && Boolean(part.attachedTo),
   );
 
-  for (const esp of attachedEsp32s) {
-    const vinKey = makePinNodeKey(esp.id, 'ESP_VIN');
-    const gndKey = makePinNodeKey(esp.id, 'ESP_GND');
-    const vinNet = netByKey.get(vinKey);
-    const gndNet = netByKey.get(gndKey);
+  if (wiringMode === '3-pin') {
+    for (const esp of attachedEsp32s) {
+      const vinKey = makePinNodeKey(esp.id, 'ESP_VIN');
+      const gndKey = makePinNodeKey(esp.id, 'ESP_GND');
+      const vinNet = netByKey.get(vinKey);
+      const gndNet = netByKey.get(gndKey);
 
-    const hasValidVin =
-      Boolean(vinNet) &&
-      !vinNet?.hasShortCircuit &&
-      !vinNet?.hasRoleMismatch &&
-      (vinNet?.endpoints.length ?? 0) >= 2;
-    if (!hasValidVin && !faultyPinKeys[vinKey]) {
-      addFaultIfUnset(faultyPinKeys, vinKey, 'MISSING_POWER');
-      issues.push({
-        id: `missing-vin-${esp.id}`,
-        kind: 'MISSING_POWER',
-        message: `${formatPartLabel(esp)} 5V / VIN has no valid VCC power distribution connection.`,
-        pinKeys: [vinKey],
-      });
-    }
+      const hasValidVin =
+        Boolean(vinNet) &&
+        !vinNet?.hasShortCircuit &&
+        !vinNet?.hasRoleMismatch &&
+        (vinNet?.endpoints.length ?? 0) >= 2;
+      if (!hasValidVin && !faultyPinKeys[vinKey]) {
+        addFaultIfUnset(faultyPinKeys, vinKey, 'MISSING_POWER');
+        issues.push({
+          id: `missing-vin-${esp.id}`,
+          kind: 'MISSING_POWER',
+          message: `${formatPartLabel(esp)} 5V / VIN has no valid VCC power distribution connection.`,
+          pinKeys: [vinKey],
+        });
+      }
 
-    const hasValidGnd =
-      Boolean(gndNet) &&
-      !gndNet?.hasShortCircuit &&
-      !gndNet?.hasRoleMismatch &&
-      (gndNet?.endpoints.length ?? 0) >= 2;
-    if (!hasValidGnd && !faultyPinKeys[gndKey]) {
-      addFaultIfUnset(faultyPinKeys, gndKey, 'MISSING_GROUND');
-      issues.push({
-        id: `missing-gnd-${esp.id}`,
-        kind: 'MISSING_GROUND',
-        message: `${formatPartLabel(esp)} GND has no valid ground return connection.`,
-        pinKeys: [gndKey],
-      });
+      const hasValidGnd =
+        Boolean(gndNet) &&
+        !gndNet?.hasShortCircuit &&
+        !gndNet?.hasRoleMismatch &&
+        (gndNet?.endpoints.length ?? 0) >= 2;
+      if (!hasValidGnd && !faultyPinKeys[gndKey]) {
+        addFaultIfUnset(faultyPinKeys, gndKey, 'MISSING_GROUND');
+        issues.push({
+          id: `missing-gnd-${esp.id}`,
+          kind: 'MISSING_GROUND',
+          message: `${formatPartLabel(esp)} GND has no valid ground return connection.`,
+          pinKeys: [gndKey],
+        });
+      }
     }
   }
+
+  const activeServoIds: string[] = [];
+  const pinToServoIdSets = new Map<PinId, Set<string>>();
 
   for (const servo of attachedServos) {
     const label = formatPartLabel(servo);
@@ -235,49 +275,49 @@ export function validateWiringTopology(
     const gndKey = makePinNodeKey(servo.id, 'SERVO_GND');
     const pwmKey = makePinNodeKey(servo.id, 'SERVO_PWM');
 
-    const vccNet = netByKey.get(vccKey);
-    const hasEspPowerRail = Boolean(
-      vccNet &&
-        !vccNet.hasShortCircuit &&
-        !vccNet.hasRoleMismatch &&
-        vccNet.endpoints.some((e) => e.part.type === 'ESP32_DEVKIT' && e.pin.role === 'POWER'),
-    );
-    if (!hasEspPowerRail && !faultyPinKeys[vccKey]) {
-      addFaultIfUnset(faultyPinKeys, vccKey, 'MISSING_POWER');
-      issues.push({
-        id: `servo-vcc-${servo.id}`,
-        kind: 'MISSING_POWER',
-        message: `${label} VCC pin must be wired to ESP32 5V / VIN.`,
-        pinKeys: [vccKey],
-      });
-    }
+    let hasValidPower = true;
+    let hasValidGround = true;
 
-    const gndNet = netByKey.get(gndKey);
-    const hasEspGroundRail = Boolean(
-      gndNet &&
-        !gndNet.hasShortCircuit &&
-        !gndNet.hasRoleMismatch &&
-        gndNet.endpoints.some((e) => e.part.type === 'ESP32_DEVKIT' && e.pin.role === 'GROUND'),
-    );
-    if (!hasEspGroundRail && !faultyPinKeys[gndKey]) {
-      addFaultIfUnset(faultyPinKeys, gndKey, 'MISSING_GROUND');
-      issues.push({
-        id: `servo-gnd-${servo.id}`,
-        kind: 'MISSING_GROUND',
-        message: `${label} GND pin must be wired to ESP32 GND.`,
-        pinKeys: [gndKey],
-      });
+    if (wiringMode === '3-pin') {
+      const vccNet = netByKey.get(vccKey);
+      hasValidPower = Boolean(
+        vccNet &&
+          !vccNet.hasShortCircuit &&
+          !vccNet.hasRoleMismatch &&
+          vccNet.endpoints.some((e) => e.part.type === 'ESP32_DEVKIT' && e.pin.role === 'POWER'),
+      );
+      if (!hasValidPower && !faultyPinKeys[vccKey]) {
+        addFaultIfUnset(faultyPinKeys, vccKey, 'MISSING_POWER');
+        issues.push({
+          id: `servo-vcc-${servo.id}`,
+          kind: 'MISSING_POWER',
+          message: `${label} VCC pin must be wired to ESP32 5V / VIN.`,
+          pinKeys: [vccKey],
+        });
+      }
+
+      const gndNet = netByKey.get(gndKey);
+      hasValidGround = Boolean(
+        gndNet &&
+          !gndNet.hasShortCircuit &&
+          !gndNet.hasRoleMismatch &&
+          gndNet.endpoints.some((e) => e.part.type === 'ESP32_DEVKIT' && e.pin.role === 'GROUND'),
+      );
+      if (!hasValidGround && !faultyPinKeys[gndKey]) {
+        addFaultIfUnset(faultyPinKeys, gndKey, 'MISSING_GROUND');
+        issues.push({
+          id: `servo-gnd-${servo.id}`,
+          kind: 'MISSING_GROUND',
+          message: `${label} GND pin must be wired to ESP32 GND.`,
+          pinKeys: [gndKey],
+        });
+      }
     }
 
     const pwmNet = netByKey.get(pwmKey);
-    const hasValidGpio = Boolean(
-      pwmNet &&
-        !pwmNet.hasShortCircuit &&
-        !pwmNet.hasRoleMismatch &&
-        pwmNet.endpoints.some(
-          (e) => e.part.type === 'ESP32_DEVKIT' && e.pin.role === 'PWM' && e.pin.gpio !== null,
-        ),
-    );
+    const validGpioEndpoints =
+      pwmNet && !pwmNet.hasShortCircuit && !pwmNet.hasRoleMismatch ? pwmNet.espGpioEndpoints : [];
+    const hasValidGpio = validGpioEndpoints.length === 1;
     if (!hasValidGpio && !faultyPinKeys[pwmKey]) {
       addFaultIfUnset(faultyPinKeys, pwmKey, 'MISSING_PWM');
       issues.push({
@@ -287,6 +327,19 @@ export function validateWiringTopology(
         pinKeys: [pwmKey],
       });
     }
+
+    if (hasValidPower && hasValidGround && hasValidGpio) {
+      activeServoIds.push(servo.id);
+      const espGpioPinId = validGpioEndpoints[0].pin.id;
+      const mappedSet = pinToServoIdSets.get(espGpioPinId) ?? new Set<string>();
+      mappedSet.add(servo.id);
+      pinToServoIdSets.set(espGpioPinId, mappedSet);
+    }
+  }
+
+  const pinToServoIds: Partial<Record<PinId, readonly string[]>> = {};
+  for (const [pinId, servoSet] of pinToServoIdSets.entries()) {
+    pinToServoIds[pinId] = Array.from(servoSet);
   }
 
   return {
@@ -294,6 +347,8 @@ export function validateWiringTopology(
     hasShortCircuit,
     issues,
     faultyPinKeys,
+    activeServoIds,
+    pinToServoIds,
   };
 }
 

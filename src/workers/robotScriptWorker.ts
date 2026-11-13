@@ -24,7 +24,28 @@ const MAX_CONSECUTIVE_UNDELAYED_LOOP_ITERATIONS = 50;
 const MAX_COMMANDS_PER_WINDOW = 250;
 const COMMAND_WINDOW_MS = 1000;
 const MAX_DELAY_MS = 60_000;
-const DECLARATIVE_LINE_PATTERN = /^(PIN_\d+|ESP_D\d+)\s*:\s*(-?\d+(?:\.\d+)?)$/i;
+const MIN_SERVO_ANGLE_DEG = -60;
+const MAX_SERVO_ANGLE_DEG = 60;
+const DECLARATIVE_LINE_PATTERN = /^(PIN_\d+|P\d+|ESP_D\d+)\s*:\s*(-?\d+(?:\.\d+)?)$/i;
+
+function normalizePinOrServoTarget(rawTarget: string): string {
+  const trimmed = rawTarget.trim();
+  const pinMatch = trimmed.match(/^(?:PIN_|P)(\d+)$/i);
+  if (pinMatch) {
+    return `P${pinMatch[1]}`;
+  }
+  return trimmed;
+}
+
+interface DslStepCommand {
+  servoTarget: string;
+  angleDeg: number;
+}
+
+interface DslStepFrame {
+  commands: DslStepCommand[];
+  delayMs: number | null;
+}
 
 let activeRunId = 0;
 let activeTimerId: ReturnType<typeof setTimeout> | null = null;
@@ -84,12 +105,21 @@ function sleepWithAbort(ms: number, runId: number): Promise<void> {
   });
 }
 
+function stripDslComment(rawLine: string): string {
+  const hashIdx = rawLine.indexOf('#');
+  const slashIdx = rawLine.indexOf('//');
+  let cutoff = rawLine.length;
+  if (hashIdx >= 0) cutoff = Math.min(cutoff, hashIdx);
+  if (slashIdx >= 0) cutoff = Math.min(cutoff, slashIdx);
+  return rawLine.slice(0, cutoff).trim();
+}
+
 function isDeclarativeScript(script: string): boolean {
   const lines = script.split(/\r?\n/);
   let hasDirective = false;
   for (const rawLine of lines) {
-    const line = rawLine.trim();
-    if (!line || line.startsWith('#') || line.startsWith('//')) {
+    const line = stripDslComment(rawLine);
+    if (!line) {
       continue;
     }
     const upper = line.toUpperCase();
@@ -102,63 +132,97 @@ function isDeclarativeScript(script: string): boolean {
   return hasDirective;
 }
 
-async function runDeclarativeScript(script: string, runId: number): Promise<void> {
+function parseDeclarativeFrames(script: string): {
+  frames: DslStepFrame[];
+  shouldLoop: boolean;
+} {
   const rawLines = script.split(/\r?\n/);
-  const shouldLoop = rawLines.some((line) => line.trim().toUpperCase() === 'LOOP');
-  let iterationsWithoutDelay = 0;
+  const frames: DslStepFrame[] = [];
+  let pendingCommands: DslStepCommand[] = [];
+  let shouldLoop = false;
 
-  do {
-    if (runId !== activeRunId) return;
+  for (const rawLine of rawLines) {
+    const line = stripDslComment(rawLine);
+    if (!line) continue;
+
+    const upper = line.toUpperCase();
+    if (upper === 'LOOP') {
+      shouldLoop = true;
+      continue;
+    }
+
+    if (upper.startsWith('DELAY')) {
+      const colonIdx = line.indexOf(':');
+      const ms = colonIdx >= 0 ? Number(line.slice(colonIdx + 1).trim()) : Number.NaN;
+      if (!Number.isFinite(ms) || ms < 0) {
+        throw new Error(`Invalid DELAY value in line "${line}".`);
+      }
+      frames.push({ commands: pendingCommands, delayMs: ms });
+      pendingCommands = [];
+      continue;
+    }
+
+    const match = line.match(DECLARATIVE_LINE_PATTERN);
+    if (match) {
+      const servoTarget = normalizePinOrServoTarget(match[1].toUpperCase());
+      const angleDeg = Math.max(
+        MIN_SERVO_ANGLE_DEG,
+        Math.min(MAX_SERVO_ANGLE_DEG, Number(match[2])),
+      );
+      pendingCommands.push({ servoTarget, angleDeg });
+    }
+  }
+
+  if (pendingCommands.length > 0) {
+    frames.push({ commands: pendingCommands, delayMs: null });
+  }
+
+  return { frames, shouldLoop };
+}
+
+async function runDeclarativeScript(script: string, runId: number): Promise<void> {
+  const { frames, shouldLoop } = parseDeclarativeFrames(script);
+  let iterationsWithoutDelay = 0;
+  let isRunning = true;
+
+  while (isRunning && runId === activeRunId) {
     let delayedThisPass = false;
 
-    for (const rawLine of rawLines) {
-      if (runId !== activeRunId) return;
-      const line = rawLine.trim();
-      if (!line || line.startsWith('#') || line.startsWith('//')) {
-        continue;
-      }
-      const upper = line.toUpperCase();
-      if (upper === 'LOOP') {
-        continue;
-      }
-      if (upper.startsWith('DELAY:')) {
-        const ms = Number(line.slice(6).trim());
-        if (!Number.isFinite(ms) || ms < 0) {
-          throw new Error(`Invalid DELAY value in line "${line}".`);
-        }
-        delayedThisPass = true;
-        await sleepWithAbort(ms, runId);
-        continue;
-      }
+    for (const frame of frames) {
+      if (!isRunning || runId !== activeRunId) return;
 
-      const match = line.match(DECLARATIVE_LINE_PATTERN);
-      if (match) {
-        const servoTarget = match[1].toUpperCase();
-        const angleDeg = Math.max(-180, Math.min(180, Number(match[2])));
+      if (frame.commands.length > 0) {
         workerScope.postMessage({
-          type: 'SET_SERVO_ANGLE',
+          type: 'SET_SERVO_BATCH',
           runId,
-          servoTarget,
-          angleDeg,
+          commands: frame.commands,
         });
       }
-    }
 
-    if (shouldLoop) {
-      if (delayedThisPass) {
-        iterationsWithoutDelay = 0;
-      } else {
-        iterationsWithoutDelay += 1;
-        if (iterationsWithoutDelay >= MAX_CONSECUTIVE_UNDELAYED_LOOP_ITERATIONS) {
-          throw new Error(
-            `Execution quota exceeded: LOOP repeated ${MAX_CONSECUTIVE_UNDELAYED_LOOP_ITERATIONS} times without DELAY.`
-          );
-        }
-        // Cooperative frame yield when LOOP has no explicit DELAY
-        await sleepWithAbort(16, runId);
+      if (frame.delayMs !== null) {
+        delayedThisPass = true;
+        await sleepWithAbort(frame.delayMs, runId);
       }
     }
-  } while (shouldLoop && runId === activeRunId);
+
+    if (!shouldLoop) {
+      isRunning = false;
+      break;
+    }
+
+    if (delayedThisPass) {
+      iterationsWithoutDelay = 0;
+    } else {
+      iterationsWithoutDelay += 1;
+      if (iterationsWithoutDelay >= MAX_CONSECUTIVE_UNDELAYED_LOOP_ITERATIONS) {
+        throw new Error(
+          `Execution quota exceeded: LOOP repeated ${MAX_CONSECUTIVE_UNDELAYED_LOOP_ITERATIONS} times without DELAY.`
+        );
+      }
+      // Cooperative frame yield when LOOP has no explicit DELAY
+      await sleepWithAbort(16, runId);
+    }
+  }
 }
 
 type AsyncScriptRunner = (
@@ -234,8 +298,8 @@ async function runJavaScriptRobotScript(script: string, runId: number): Promise<
     workerScope.postMessage({
       type: 'SET_SERVO_ANGLE',
       runId,
-      servoTarget: servoId.trim(),
-      angleDeg: Math.max(-180, Math.min(180, angle)),
+      servoTarget: normalizePinOrServoTarget(servoId),
+      angleDeg: Math.max(MIN_SERVO_ANGLE_DEG, Math.min(MAX_SERVO_ANGLE_DEG, angle)),
     });
   };
 

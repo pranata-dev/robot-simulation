@@ -4,7 +4,7 @@ import { memo, useEffect, useMemo, useRef } from 'react';
 import * as THREE from 'three';
 import { QuadraticBezierLine, type QuadraticBezierLineRef } from '@react-three/drei';
 import { useFrame } from '@react-three/fiber';
-import { findPinDefinition } from '@/lib/constants/socketRegistry';
+import { findPinDefinition, getWireColorForPinRole } from '@/lib/constants/socketRegistry';
 import { makePinNodeKey } from '@/lib/microcontroller/circuitValidator';
 import { useSimulationStore } from '@/store/useSimulationStore';
 import type { Vector3Tuple, WireConnection, WorkspacePart } from '@/types/simulator';
@@ -122,13 +122,26 @@ function DynamicWire({ wire }: { wire: WireConnection }) {
     line.setPoints(frameStartRef.current, frameEndRef.current, frameMidRef.current);
   });
 
+  const wireColor = useMemo(() => {
+    if (isFaultyWire) return '#ef4444';
+    const fromPin = fromPart ? findPinDefinition(fromPart.type, wire.fromPinId) : undefined;
+    const toPin = toPart ? findPinDefinition(toPart.type, wire.toPinId) : undefined;
+    const primaryRole =
+      fromPin?.role === 'POWER' || toPin?.role === 'POWER'
+        ? 'POWER'
+        : fromPin?.role === 'GROUND' || toPin?.role === 'GROUND'
+          ? 'GROUND'
+          : (fromPin?.role ?? toPin?.role);
+    return primaryRole ? getWireColorForPinRole(primaryRole) : wire.color;
+  }, [fromPart, isFaultyWire, toPart, wire.color, wire.fromPinId, wire.toPinId]);
+
   return (
     <QuadraticBezierLine
       ref={lineRef}
       start={curvePoints.start}
       end={curvePoints.end}
       mid={curvePoints.mid}
-      color={isFaultyWire ? '#ef4444' : wire.color}
+      color={wireColor}
       lineWidth={isFaultyWire ? 3.5 : 2.5}
     />
   );
@@ -136,8 +149,22 @@ function DynamicWire({ wire }: { wire: WireConnection }) {
 
 const MemoDynamicWire = memo(DynamicWire);
 
+function isServoPowerOrGroundPin(pinId: string): boolean {
+  return pinId === 'SERVO_VCC' || pinId === 'SERVO_GND';
+}
+
 export default function WiringSystem() {
   const wires = useSimulationStore((state) => state.wires);
+  const wiringMode = useSimulationStore((state) => state.wiringMode);
+  const visibleWires = useMemo(
+    () =>
+      wiringMode === '1-wire'
+        ? wires.filter(
+            (w) => !isServoPowerOrGroundPin(w.fromPinId) && !isServoPowerOrGroundPin(w.toPinId),
+          )
+        : wires,
+    [wires, wiringMode],
+  );
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -153,7 +180,7 @@ export default function WiringSystem() {
 
   return (
     <group name="WIRING_SYSTEM">
-      {wires.map((wire) => (
+      {visibleWires.map((wire) => (
         <MemoDynamicWire key={wire.id} wire={wire} />
       ))}
     </group>
