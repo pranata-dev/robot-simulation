@@ -5,6 +5,7 @@ import * as THREE from 'three';
 import { QuadraticBezierLine, type QuadraticBezierLineRef } from '@react-three/drei';
 import { useFrame } from '@react-three/fiber';
 import { findPinDefinition } from '@/lib/constants/socketRegistry';
+import { makePinNodeKey } from '@/lib/microcontroller/circuitValidator';
 import { useSimulationStore } from '@/store/useSimulationStore';
 import type { Vector3Tuple, WireConnection, WorkspacePart } from '@/types/simulator';
 
@@ -48,6 +49,19 @@ function DynamicWire({ wire }: { wire: WireConnection }) {
   const toPart = useSimulationStore((state) =>
     state.workspaceParts.find((part) => part.id === wire.toPartId),
   );
+  const isFaultyWire = useSimulationStore((state) => {
+    if (!state.showCircuitDiagnostics) return false;
+    const fromFault =
+      state.wiringValidation.faultyPinKeys[makePinNodeKey(wire.fromPartId, wire.fromPinId)];
+    const toFault =
+      state.wiringValidation.faultyPinKeys[makePinNodeKey(wire.toPartId, wire.toPinId)];
+    return (
+      fromFault === 'SHORT_CIRCUIT' ||
+      toFault === 'SHORT_CIRCUIT' ||
+      fromFault === 'ROLE_MISMATCH' ||
+      toFault === 'ROLE_MISMATCH'
+    );
+  });
 
   const lineRef = useRef<QuadraticBezierLineRef | null>(null);
   const fromObjRef = useRef<THREE.Object3D | null>(null);
@@ -114,8 +128,8 @@ function DynamicWire({ wire }: { wire: WireConnection }) {
       start={curvePoints.start}
       end={curvePoints.end}
       mid={curvePoints.mid}
-      color={wire.color}
-      lineWidth={2.5}
+      color={isFaultyWire ? '#ef4444' : wire.color}
+      lineWidth={isFaultyWire ? 3.5 : 2.5}
     />
   );
 }
