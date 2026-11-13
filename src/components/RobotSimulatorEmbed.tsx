@@ -3,9 +3,11 @@
 import { useEffect, useRef, useState } from 'react';
 import dynamic from 'next/dynamic';
 import { Award, Lock, ShieldAlert } from 'lucide-react';
+import CanvasToolbar from '@/components/ui/CanvasToolbar';
 import CircuitDiagnosticAlert from '@/components/ui/CircuitDiagnosticAlert';
 import CodeEditorPanel from '@/components/ui/CodeEditorPanel';
 import InventoryPanel from '@/components/ui/InventoryPanel';
+import TelemetryHUD from '@/components/ui/TelemetryHUD';
 import { useSimulationStore } from '@/store/useSimulationStore';
 import type { ChallengeMetrics, PartType } from '@/types/simulator';
 
@@ -140,11 +142,13 @@ export default function RobotSimulatorEmbed({
       }
     >
       <InventoryPanel allowedParts={allowedParts} readOnly={readOnly} />
+      <CanvasToolbar />
       <CircuitDiagnosticAlert />
+      <TelemetryHUD />
       <CodeEditorPanel />
       <SimulationScene />
 
-      <div className="pointer-events-none absolute top-4 left-1/2 z-10 flex -translate-x-1/2 flex-wrap items-center justify-center gap-2">
+      <div className="pointer-events-none absolute top-16 left-1/2 z-10 flex -translate-x-1/2 flex-wrap items-center justify-center gap-2">
         {readOnly && (
           <span className="inline-flex items-center gap-1.5 rounded-full border border-slate-500/40 bg-slate-950/80 px-3 py-1 text-xs font-semibold text-slate-100 shadow-md backdrop-blur-sm">
             <Lock className="h-3.5 w-3.5 text-amber-300" />
@@ -169,7 +173,7 @@ export default function RobotSimulatorEmbed({
       {snapshotError && (
         <div
           role="alert"
-          className="absolute top-16 left-1/2 z-20 max-w-md -translate-x-1/2 rounded-lg border border-rose-500/50 bg-rose-950/95 px-3.5 py-2 text-xs text-rose-100 shadow-xl backdrop-blur-sm"
+          className="absolute top-28 left-1/2 z-20 max-w-md -translate-x-1/2 rounded-lg border border-rose-500/50 bg-rose-950/95 px-3.5 py-2 text-xs text-rose-100 shadow-xl backdrop-blur-sm"
         >
           {snapshotError}
         </div>

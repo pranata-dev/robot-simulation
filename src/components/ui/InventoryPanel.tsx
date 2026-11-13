@@ -1,6 +1,6 @@
 'use client';
 
-import { Box, Cpu, Crosshair, Flag, Moon, RotateCcw, Sun } from 'lucide-react';
+import { Box, Cable, Cpu, Crosshair, Flag, Moon, RotateCcw, Sun } from 'lucide-react';
 import { useSimulationStore } from '@/store/useSimulationStore';
 import type { PartType } from '@/types/simulator';
 
@@ -28,8 +28,10 @@ export default function InventoryPanel({
   const storeReadOnly = useSimulationStore((state) => state.readOnly);
   const workspacePartsCount = useSimulationStore((state) => state.workspaceParts.length);
   const simulationStatus = useSimulationStore((state) => state.simulationStatus);
+  const wiringMode = useSimulationStore((state) => state.wiringMode);
   const theme = useSimulationStore((state) => state.theme);
   const spawnPart = useSimulationStore((state) => state.spawnPart);
+  const setWiringMode = useSimulationStore((state) => state.setWiringMode);
   const toggleTheme = useSimulationStore((state) => state.toggleTheme);
   const resetPositions = useSimulationStore((state) => state.resetPositions);
   const resetWorkspace = useSimulationStore((state) => state.resetWorkspace);
@@ -83,6 +85,43 @@ export default function InventoryPanel({
             className="rounded-lg border border-[#827148]/25 bg-[#FFEED6] p-1.5 text-[#827148] transition-colors hover:bg-[#E8A07C] hover:text-[#FFEED6] disabled:cursor-not-allowed disabled:opacity-40"
           >
             <RotateCcw className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      </div>
+
+      <div className="mb-3 flex items-center justify-between gap-2 rounded-lg border border-[#827148]/20 bg-[#827148]/10 px-2.5 py-1.5">
+        <span className="flex items-center gap-1.5 text-[11px] font-bold tracking-wide uppercase">
+          <Cable className="h-3.5 w-3.5 shrink-0" />
+          Wiring
+        </span>
+        <div role="group" aria-label="Wiring Mode" className="flex items-center gap-1">
+          <button
+            type="button"
+            onClick={() => setWiringMode('3-pin')}
+            disabled={!canEditAssembly}
+            aria-pressed={wiringMode === '3-pin'}
+            title="3-Pin Realistic Wiring (PWM + 5V + GND)"
+            className={`rounded-md px-2 py-0.5 text-[11px] font-bold transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
+              wiringMode === '3-pin'
+                ? 'bg-[#827148] text-[#FFEED6] shadow-sm'
+                : 'bg-[#FFEED6] text-[#827148] hover:bg-[#A5AF79]/40'
+            }`}
+          >
+            3-Pin
+          </button>
+          <button
+            type="button"
+            onClick={() => setWiringMode('1-wire')}
+            disabled={!canEditAssembly}
+            aria-pressed={wiringMode === '1-wire'}
+            title="1-Wire Signal Shield (PWM only)"
+            className={`rounded-md px-2 py-0.5 text-[11px] font-bold transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
+              wiringMode === '1-wire'
+                ? 'bg-[#827148] text-[#FFEED6] shadow-sm'
+                : 'bg-[#FFEED6] text-[#827148] hover:bg-[#A5AF79]/40'
+            }`}
+          >
+            1-Wire
           </button>
         </div>
       </div>

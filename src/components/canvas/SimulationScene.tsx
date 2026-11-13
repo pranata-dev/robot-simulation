@@ -3,19 +3,22 @@
 import { Suspense, useEffect, useRef } from 'react';
 import { Canvas } from '@react-three/fiber';
 import { ContactShadows, Environment, OrbitControls } from '@react-three/drei';
-import { CuboidCollider, Physics, RigidBody, interactionGroups } from '@react-three/rapier';
+import { CuboidCollider, Physics, RigidBody } from '@react-three/rapier';
 import type * as THREE from 'three';
-import ChassisBase from '@/components/canvas/parts/ChassisBase';
-import ESP32Proxy from '@/components/canvas/parts/ESP32Proxy';
-import ObstacleProxy from '@/components/canvas/parts/ObstacleProxy';
-import ServoProxy from '@/components/canvas/parts/ServoProxy';
-import SpiderLegProxy from '@/components/canvas/parts/SpiderLegProxy';
-import TargetZoneProxy from '@/components/canvas/parts/TargetZoneProxy';
+import ChassisBase from '@/components/canvas/parts/robots/spider/ChassisBase';
+import SpiderLegProxy from '@/components/canvas/parts/robots/spider/SpiderLegProxy';
+import ESP32Proxy from '@/components/canvas/parts/shared/ESP32Proxy';
+import ObstacleProxy from '@/components/canvas/parts/shared/ObstacleProxy';
+import ServoProxy from '@/components/canvas/parts/shared/ServoProxy';
+import TargetZoneProxy from '@/components/canvas/parts/shared/TargetZoneProxy';
+import CameraViewController, { type OrbitControlsHandle } from '@/components/canvas/CameraViewController';
 import JointSystem from '@/components/canvas/JointSystem';
 import PerformanceMonitorGuard from '@/components/canvas/PerformanceMonitorGuard';
+import PhysicsInspectorOverlay from '@/components/canvas/PhysicsInspectorOverlay';
 import WiringSystem from '@/components/canvas/WiringSystem';
 import { useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts';
 import { clearPhysicsRegistry } from '@/lib/physics/rigidBodyRegistry';
+import { ENV_COLLISION_GROUPS } from '@/lib/physics/servoMotorControl';
 import { disposeSceneResources } from '@/lib/three/disposeSceneResources';
 import { useSimulationStore } from '@/store/useSimulationStore';
 import type { ThemeMode, Vector3Tuple } from '@/types/simulator';
@@ -107,25 +110,18 @@ function WorkspaceParts() {
 function Floor({ theme }: { theme: ThemeMode }) {
   return (
     <RigidBody
-      type="fixed"
-      colliders={false}
-      name="FLOOR"
-      position={[0, 0, 0]}
-      friction={1.5}
-      collisionGroups={interactionGroups(0, [0, 1])}
+      type="fixed" colliders={false} name="FLOOR" position={[0, 0, 0]}
+      friction={1.5} restitution={0}
+      collisionGroups={ENV_COLLISION_GROUPS} solverGroups={ENV_COLLISION_GROUPS}
     >
       <CuboidCollider
-        args={[FLOOR_HALF, FLOOR_THICKNESS_HALF, FLOOR_HALF]}
-        position={[0, -FLOOR_THICKNESS_HALF, 0]}
-        friction={1.5}
+        args={[FLOOR_HALF, FLOOR_THICKNESS_HALF, FLOOR_HALF]} position={[0, -FLOOR_THICKNESS_HALF, 0]}
+        friction={1.5} restitution={0}
+        collisionGroups={ENV_COLLISION_GROUPS} solverGroups={ENV_COLLISION_GROUPS}
       />
       <mesh rotation={[-Math.PI / 2, 0, 0]} receiveShadow>
         <planeGeometry args={[FLOOR_SIZE, FLOOR_SIZE]} />
-        <meshStandardMaterial
-          color={theme === 'dark' ? '#1e293b' : '#f1f5f9'}
-          roughness={0.85}
-          metalness={0.05}
-        />
+        <meshStandardMaterial color={theme === 'dark' ? '#1e293b' : '#f1f5f9'} roughness={0.85} metalness={0.05} />
       </mesh>
     </RigidBody>
   );
@@ -157,13 +153,17 @@ function Lights({ theme, shadowsEnabled }: { theme: ThemeMode; shadowsEnabled: b
 
 export default function SimulationScene() {
   useKeyboardShortcuts();
-  const isPhysicsPaused = useSimulationStore((state) => state.simulationStatus !== 'playing');
+  const simulationStatus = useSimulationStore((state) => state.simulationStatus);
+  const isPhysicsPaused = simulationStatus !== 'playing';
+  const runId = useSimulationStore((state) => state.runId);
   const resetNonce = useSimulationStore((state) => state.resetNonce);
   const theme = useSimulationStore((state) => state.theme);
   const performanceMode = useSimulationStore((state) => state.performanceMode);
+  const physicsInspectorOpen = useSimulationStore((state) => state.physicsInspectorOpen);
   const isDark = theme === 'dark';
   const glRef = useRef<THREE.WebGLRenderer | null>(null);
   const sceneRef = useRef<THREE.Scene | null>(null);
+  const controlsRef = useRef<OrbitControlsHandle | null>(null);
 
   useEffect(() => {
     return () => {
@@ -209,13 +209,8 @@ export default function SimulationScene() {
         />
         {!performanceMode && (
           <ContactShadows
-            resolution={1024}
-            scale={20}
-            blur={2}
-            opacity={isDark ? 0.55 : 0.4}
-            far={2}
-            color="#000000"
-            position={[0, 0.001, 0]}
+            resolution={1024} scale={20} blur={2} far={2} color="#000000"
+            opacity={isDark ? 0.55 : 0.4} position={[0, 0.001, 0]}
           />
         )}
 
@@ -223,13 +218,17 @@ export default function SimulationScene() {
           <Environment preset="city" environmentIntensity={isDark ? 0.45 : 0.85} />
           <Physics gravity={GRAVITY} paused={isPhysicsPaused}>
             <Floor theme={theme} />
-            <WorkspaceParts />
-            <JointSystem key={resetNonce} />
+            <group key={`sim-${runId}-${resetNonce}-${simulationStatus}`}>
+              <WorkspaceParts />
+              <JointSystem />
+            </group>
           </Physics>
         </Suspense>
 
         <WiringSystem />
-        <OrbitControls makeDefault target={[0, 0, 0]} enableDamping />
+        {physicsInspectorOpen && <PhysicsInspectorOverlay />}
+        <OrbitControls ref={controlsRef} makeDefault target={[0, 0, 0]} enableDamping />
+        <CameraViewController controlsRef={controlsRef} defaultCameraPosition={CAMERA_POSITION} />
       </Canvas>
 
       {performanceMode && (

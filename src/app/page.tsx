@@ -1,9 +1,11 @@
 'use client';
 
 import dynamic from 'next/dynamic';
+import CanvasToolbar from '@/components/ui/CanvasToolbar';
 import CircuitDiagnosticAlert from '@/components/ui/CircuitDiagnosticAlert';
 import CodeEditorPanel from '@/components/ui/CodeEditorPanel';
 import InventoryPanel from '@/components/ui/InventoryPanel';
+import TelemetryHUD from '@/components/ui/TelemetryHUD';
 import { useSimulationStore } from '@/store/useSimulationStore';
 
 const SimulationScene = dynamic(() => import('@/components/canvas/SimulationScene'), {
@@ -20,7 +22,9 @@ export default function Home() {
       }`}
     >
       <InventoryPanel />
+      <CanvasToolbar />
       <CircuitDiagnosticAlert />
+      <TelemetryHUD />
       <CodeEditorPanel />
       <SimulationScene />
     </main>
