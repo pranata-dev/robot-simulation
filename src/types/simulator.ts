@@ -14,6 +14,10 @@ export type PartType =
 
 export type SimulationStatus = 'idle' | 'playing' | 'paused';
 
+export type WiringMode = '3-pin' | '1-wire';
+
+export type ViewMode = 'normal' | 'wiring_xray';
+
 export type ChassisSocketId =
   | 'SOCKET_MCU'
   | 'SOCKET_BAT'
@@ -155,6 +159,8 @@ export interface WiringValidationResult {
   hasShortCircuit: boolean;
   issues: readonly CircuitDiagnosticIssue[];
   faultyPinKeys: Readonly<Record<string, CircuitFaultKind>>;
+  activeServoIds: readonly string[];
+  pinToServoIds: Readonly<Partial<Record<PinId, readonly string[]>>>;
 }
 
 export type WorkerLogLevel = 'info' | 'warn' | 'error';
@@ -186,6 +192,14 @@ export type WorkerOutboundMessage =
       runId: number;
       servoTarget: string;
       angleDeg: number;
+    }
+  | {
+      type: 'SET_SERVO_BATCH';
+      runId: number;
+      commands: Array<{
+        servoTarget: string;
+        angleDeg: number;
+      }>;
     }
   | {
       type: 'LOG';
@@ -225,11 +239,31 @@ export interface SimulationSnapshot {
   wires: WireConnection[];
   script: string;
   theme?: ThemeMode;
+  wiringMode?: WiringMode;
 }
 
 export interface SimulationEmbedConfig {
   allowedParts?: PartType[] | null;
   readOnly?: boolean;
   zeroCollisionMode?: boolean;
+}
+
+export interface BuiltInPreset {
+  id: string;
+  name: string;
+  description: string;
+  snapshot: SimulationSnapshot;
+}
+
+export type RobotBlueprintId = 'spider';
+
+export interface RobotBlueprintConfig {
+  id: RobotBlueprintId;
+  name: string;
+  chassisDimensions: Vector3Tuple;
+  chassisAssemblyWorkingY: number;
+  sockets: Readonly<Record<PartType, readonly SocketDefinition[]>>;
+  defaultInventoryCounts: Readonly<Record<PartType, number>>;
+  presets: readonly BuiltInPreset[];
 }
 
