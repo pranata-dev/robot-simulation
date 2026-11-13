@@ -20,6 +20,19 @@ Dokumen ini adalah referensi spasial mutlak untuk AI saat menyusun posisi kompon
 
 ---
 
+## 1A. Chassis Grounding & Assembly Support Jig Constants (`socketRegistry.ts`)
+- **Formula Grounding Dasar (`CHASSIS_HALF_HEIGHT`):**
+  - `CHASSIS_DIMENSIONS` $= [1.20, 0.15, 1.60]$
+  - `CHASSIS_HALF_HEIGHT` $= \frac{0.15}{2} = 0.075$
+  - `CHASSIS_COLLIDER_HALF_EXTENTS` $= [0.60, 0.075, 0.80]$ (sinkron antara `<boxGeometry>` dan Rapier `<CuboidCollider>`).
+  - Ketika **tidak ada kaki (`LEG_TIBIA`) yang terpasang**, titik pusat sasis berada pada $y = \text{CHASSIS\_HALF\_HEIGHT} = 0.075$ sehingga bagian bawah sasis menempel rata di lantai ($y = 0$) tanpa celah melayang.
+- **Tinggi Perakitan Kerja & Assembly Stand (`CHASSIS_ASSEMBLY_WORKING_Y`):**
+  - `CHASSIS_ASSEMBLY_WORKING_Y` $= 0.50$ (tinggi kerja standar saat minimal satu `LEG_TIBIA` terpasang agar ujung kaki tidak menembus lantai $y = 0$).
+  - Selama `simulationStatus === 'idle'` dan sasis berada di atas lantai ($y > \text{CHASSIS\_HALF\_HEIGHT}$), `AssemblyStand` merender jig penopang industri semi-transparan plus `<CuboidCollider>` tetap dari $y = 0$ hingga bagian bawah sasis ($y - \text{CHASSIS\_HALF\_HEIGHT} = 0.425$).
+  - Saat `simulationStatus === 'playing'`, `AssemblyStand` disembunyikan dan *collider*-nya dinonaktifkan sepenuhnya sehingga robot berdiri di atas kaki-kakinya akibat gravitasi Rapier.
+
+---
+
 ## 2. Hirarki Perakitan (Assembly Tree)
 Robot laba-laba menggunakan konfigurasi **Quadruped $8\text{ DOF}$** (4 kaki, masing-masing 2 motor servo: *Hip/Yaw* dan *Knee/Pitch*):
 - **FL:** Front-Left (Kiri Depan)

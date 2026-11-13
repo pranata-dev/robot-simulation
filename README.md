@@ -138,3 +138,56 @@ robot-simulation/
 
 - **Scale**: `1` scene unit equals `10 cm` (`0.1 m`), defined in `docs/3d_asset_socket_coordinate_map.md` and `src/lib/constants/socketRegistry.ts`.
 - **Motor Tuning**: `JointSystem.tsx` drives `LEG_TIBIA` revolute joints using `AccelerationBased` motor control (`MOTOR_STIFFNESS = 500000`, `MOTOR_DAMPING = 20000`) and wakes connected bodies on every `servoAngles` update and physics frame while playing.
+- **Worker Sandbox**: Control scripts run inside `src/workers/robotScriptWorker.ts` with a `1.5s` heartbeat watchdog (`worker.terminate()` on tight loops) and command rate quota.
+- **Adaptive Performance**: `PerformanceMonitorGuard.tsx` samples rolling FPS in the render loop and automatically enables `performanceMode` (disabling real-time shadows and clamping `dpr` to `[1, 1]`) if FPS remains below 30 for over 2 seconds.
+
+## E-Learning Platform Embedding (`<RobotSimulatorEmbed />`)
+
+Import `<RobotSimulatorEmbed />` dynamically with SSR disabled inside Next.js lesson pages so Three.js, Rapier WASM, and Web Workers initialize strictly on the client:
+
+```tsx
+'use client';
+
+import dynamic from 'next/dynamic';
+
+const RobotSimulatorEmbed = dynamic(
+  () => import('@/components/RobotSimulatorEmbed'),
+  { ssr: false },
+);
+
+export function RoboticsLessonModule({ starterJson }: { starterJson?: string }) {
+  return (
+    <div className="h-[680px] w-full rounded-xl overflow-hidden border">
+      <RobotSimulatorEmbed
+        allowedParts={['CHASSIS_BASE', 'ESP32_DEVKIT', 'SERVO_MG90S', 'LEG_TIBIA']}
+        presetSnapshot={starterJson}
+        zeroCollisionMode
+        onStateChange={(snapshotJson) => {
+          // Persist debounced snapshot JSON (schemaVersion "1.0.0") to your LMS backend
+          console.log('Saved progress snapshot:', snapshotJson);
+        }}
+        onChallengeSuccess={({ completionTimeMs, obstacleHits }) => {
+          // Award lesson completion credit once the chassis dwells in TargetZoneProxy for 1.5s
+          console.log('Challenge passed:', completionTimeMs, obstacleHits);
+        }}
+      />
+    </div>
+  );
+}
+```
+
+### `<RobotSimulatorEmbed />` Props
+
+| Prop | Type | Default | Description |
+| --- | --- | --- | --- |
+| `allowedParts` | `PartType[]` | `undefined` (all) | Restricts parts listed in `InventoryPanel` and `spawnPart` to match the lesson scope. |
+| `presetSnapshot` | `string` | `undefined` | Validated `1.0.0` JSON snapshot loaded on mount/change for starter assemblies or broken-circuit debugging tasks. |
+| `readOnly` | `boolean` | `false` | Locks part spawning, dragging, snapping, wiring, deletion, workspace clearing, and script editing while allowing simulation playback. |
+| `zeroCollisionMode` | `boolean` | `false` | Marks `challengeStatus` as `'failed'` if any robot part collides with an `ObstacleProxy`. |
+| `onStateChange` | `(snapshotJson: string) => void` | `undefined` | Debounced (`400ms`) callback emitting serialized JSON (`schemaVersion: "1.0.0"`, `workspaceParts`, `wires`, `script`, `theme`). |
+| `onChallengeSuccess` | `(metrics: { completionTimeMs: number; obstacleHits: number }) => void` | `undefined` | Fired once when `CHASSIS_BASE` dwells inside `TargetZoneProxy` for `1.5s` during active simulation (`challengeStatus === 'completed'`). |
+| `className` | `string` | fills container | Custom wrapper classes for sizing inside responsive LMS lesson layouts. |
+
+### Snapshot Schema Validation
+
+`useSimulationStore` exposes `exportSimulationSnapshot()` and `importSimulationSnapshot(jsonString)` backed by `parseAndValidateSimulationSnapshot` in `src/lib/snapshot/snapshotSerializer.ts`. Payloads with missing/outdated `schemaVersion` (other than `"1.0.0"`), invalid vectors, broken parent-child attachment cycles, or unknown part/socket/pin IDs fail gracefully with `{ success: false, error }` without modifying active store state.

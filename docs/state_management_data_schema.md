@@ -1,11 +1,13 @@
 # State Management & Data Schema (Zustand)
 
-Seluruh *state* aplikasi dikelola menggunakan satu *store* terpusat di `src/store/useSimulatorStore.ts` menggunakan **Zustand**. 
+Seluruh *state* aplikasi dikelola menggunakan satu *store* terpusat di `src/store/useSimulationStore.ts` menggunakan **Zustand**.
 
 ## 1. TypeScript Interfaces (`src/types/simulator.ts`)
 
 ```typescript
-export type SimulatorMode = 'assembly' | 'wiring' | 'coding' | 'simulate';
+export type SimulationStatus = 'idle' | 'playing' | 'paused';
+
+export type ThemeMode = 'light' | 'dark';
 
 export type PartType =
   | 'CHASSIS_BASE'
@@ -13,110 +15,171 @@ export type PartType =
   | 'BATTERY_2S'
   | 'SERVO_MG90S'
   | 'LEG_COXA'
-  | 'LEG_TIBIA';
+  | 'LEG_TIBIA'
+  | 'OBSTACLE_BLOCK'
+  | 'TARGET_ZONE';
 
 export type Vector3Tuple = [number, number, number];
 
-export interface PlacedPart {
-  instanceId: string;           // UUID unik part di workspace (misal: "servo_fl_hip")
+export interface WorkspacePart {
+  id: string;                 // UUID unik part di workspace
   type: PartType;
-  label: string;                // Nama tampilan (misal: "Servo Front-Left Hip")
-  position: Vector3Tuple;       // Posisi world [x, y, z] saat belum di-snap
-  rotation: Vector3Tuple;       // Rotasi Euler [x, y, z]
-  parentPartId: string | null;  // ID part induk tempat part ini menempel
-  snappedSocketId: string | null; // ID socket tempat part ini menempel (misal: "SOCKET_HIP_FL")
+  label: string;              // Nama tampilan (misal: "Micro Servo MG90S")
+  position: Vector3Tuple;     // Posisi world [x, y, z]
+  rotation: Vector3Tuple;     // Rotasi Euler [x, y, z] dalam radian
+  attachedTo?: string;        // ID part induk tempat part ini menempel
+  socketId?: SocketId;        // ID socket tempat part ini menempel (misal: "SOCKET_HIP_FL")
 }
 
 export interface WireConnection {
   id: string;
-  fromPartId: string;           // Instance ID part asal
-  fromPinId: string;            // Pin ID asal (misal: "ESP_D13")
-  toPartId: string;             // Instance ID part tujuan
-  toPinId: string;              // Pin ID tujuan (misal: "SERVO_PWM")
-  color: string;                // Hex color kabel (#ef4444, #eab308, dll)
+  fromPartId: string;         // Instance ID part asal
+  fromPinId: PinId;           // Pin ID asal (misal: "ESP_D13")
+  toPartId: string;           // Instance ID part tujuan
+  toPinId: PinId;             // Pin ID tujuan (misal: "SERVO_PWM")
+  color: string;              // Hex color kabel (#ef4444, #eab308, dll)
 }
 
-export interface CircuitValidationResult {
+export interface PartSelectionBounds {
+  center: Vector3Tuple;
+  size: Vector3Tuple;
+}
+
+export type PinNodeKey = `${string}:${PinId}`;
+
+export type CircuitFaultKind =
+  | 'SHORT_CIRCUIT'
+  | 'ROLE_MISMATCH'
+  | 'MISSING_POWER'
+  | 'MISSING_GROUND'
+  | 'MISSING_PWM';
+
+export interface CircuitDiagnosticIssue {
+  id: string;
+  kind: CircuitFaultKind;
+  message: string;
+  pinKeys: readonly PinNodeKey[];
+}
+
+export interface WiringValidationResult {
   isValid: boolean;
-  errors: string[];             // Pesan error jika ada kabel salah pasang / short circuit
-  warnings: string[];           // Peringatan jika ada servo yang belum diberi kabel PWM
-  pinToServoMap: Record<number, string>; // Mapping nomor GPIO (misal: 13) ke instanceId Servo
-}
-
-export interface PhysicsSandboxConfig {
-  gravityY: number;             // Default: -9.81 (m/s^2)
-  floorFriction: number;        // Default: 0.8
-  inclineAngleDeg: number;      // Sudut kemiringan bidang untuk eksperimen fisika (0 - 45 derajat)
-  blockMass: number;            // Massa benda uji (kg)
+  hasShortCircuit: boolean;
+  issues: readonly CircuitDiagnosticIssue[];
+  faultyPinKeys: Readonly<Record<string, CircuitFaultKind>>;
 }
 ```
 
 ---
 
-## 2. Struktur Store Zustand (`useSimulatorStore.ts`)
+## 2. Struktur Store Zustand (`src/store/useSimulationStore.ts`)
 
 ```typescript
-export interface SimulatorState {
-  // --- Mode & UI State ---
-  mode: SimulatorMode;
-  selectedPartId: string | null;
-  activeDraggingPartId: string | null;
-  pendingWireStart: { partId: string; pinId: string } | null;
-
-  // --- Assembly & Wiring Data ---
-  parts: Record<string, PlacedPart>;
+export interface SimulationData {
+  // --- Schema, Inventory & Assembly Data ---
+  schemaVersion: '1.0.0';
+  inventory: InventoryItem[];
+  workspaceParts: WorkspacePart[];
   wires: WireConnection[];
+  activeDraftWire: DraftWire | null;
 
-  // --- Microcontroller & Kinematics State ---
-  userCode: string;
-  isCodeRunning: boolean;
-  // Menyimpan target sudut servo dalam derajat [0, 180], default 90 (posisi netral)
-  servoTargetAngles: Record<string, number>; 
-  validationResult: CircuitValidationResult | null;
+  // --- Embed, Challenge Grading & Performance State ---
+  allowedParts: PartType[] | null;
+  readOnly: boolean;
+  zeroCollisionMode: boolean;
+  challengeStatus: ChallengeStatus;
+  obstacleHits: number;
+  simulationStartedAt: number | null;
+  completionTimeMs: number | null;
+  performanceMode: boolean;
 
-  // --- General Physics Lab State ---
-  physicsConfig: PhysicsSandboxConfig;
+  // --- Simulation, Selection & UI State ---
+  simulationStatus: SimulationStatus;
+  selectedPartId: string | null;
+  activeSnapTarget: ActiveSnapTarget | null;
+  wiringValidation: WiringValidationResult;
+  showCircuitDiagnostics: boolean;
 
-  // --- Actions ---
-  setMode: (mode: SimulatorMode) => void;
-  addPart: (type: PartType, initialPos?: Vector3Tuple) => string;
-  removePart: (instanceId: string) => void;
-  updatePartTransform: (instanceId: string, pos: Vector3Tuple, rot: Vector3Tuple) => void;
-  snapPartToSocket: (childId: string, parentId: string, socketId: string) => void;
-  unsnapPart: (instanceId: string) => void;
+  // --- Microcontroller & Physics State ---
+  script: string;
+  scriptLogs: ScriptConsoleEntry[];
+  scriptError: string | null;
+  servoAngles: Record<string, number>;
+  rigidBodyRefs: Record<string, RefObject<RapierRigidBody | null>>;
+  resetNonce: number;
+  isLevelComplete: boolean;
+  theme: ThemeMode;
+}
 
-  // --- Wiring Actions ---
-  startWire: (partId: string, pinId: string) => void;
-  completeWire: (toPartId: string, toPinId: string) => void;
-  cancelWire: () => void;
+export interface SimulationActions {
+  spawnPart: (type: PartType, position?: Vector3Tuple, rotation?: Vector3Tuple) => string | null;
+  selectPart: (partId: string | null) => void;
+  removePart: (partId: string) => void;
+  updatePartPosition: (partId: string, position: Vector3Tuple) => void;
+  updatePartTransform: (partId: string, position: Vector3Tuple, rotation: Vector3Tuple) => void;
+  snapPartToSocket: (
+    partId: string,
+    parentId: string,
+    socketId: SocketId,
+    position: Vector3Tuple,
+    rotation: Vector3Tuple,
+  ) => void;
+  detachPart: (partId: string, position: Vector3Tuple, rotation?: Vector3Tuple) => void;
+  setActiveSnapTarget: (target: ActiveSnapTarget | null) => void;
+  startWiring: (startPartId: string, startPinId: PinId, startPos: Vector3Tuple) => void;
+  completeWiring: (toPartId: string, toPinId: PinId) => string | null;
+  cancelWiring: () => void;
   removeWire: (wireId: string) => void;
-  autoWireDefaultPreset: () => void; // Helper untuk testing cepat
-
-  // --- Simulation & Servo Actions ---
-  setUserCode: (code: string) => void;
-  setServoAngle: (servoInstanceId: string, angleDeg: number) => void;
-  setServoAngleByGpio: (gpioNumber: number, angleDeg: number) => void;
-  validateAndStartSimulation: () => boolean;
-  resetSimulation: () => void;
-  loadCompleteSpiderPreset: () => void; // Memuat robot yang sudah terakit penuh untuk demo instan
+  dismissCircuitDiagnostics: () => void;
+  setScript: (script: string) => void;
+  clearScriptLogs: () => void;
+  clearScriptError: () => void;
+  runSimulation: () => void;
+  stopSimulation: () => void;
+  setSimulationStatus: (status: SimulationStatus) => void;
+  registerRigidBody: (id: string, ref: RefObject<RapierRigidBody | null>) => void;
+  unregisterRigidBody: (id: string, ref?: RefObject<RapierRigidBody | null>) => void;
+  completeLevel: () => void;
+  completeChallenge: () => void;
+  recordObstacleHit: () => void;
+  setEmbedConfig: (config: SimulationEmbedConfig) => void;
+  setPerformanceMode: (enabled: boolean) => void;
+  exportSimulationSnapshot: () => string;
+  importSimulationSnapshot: (jsonString: string) => SnapshotImportResult;
+  toggleTheme: () => void;
+  resetPositions: () => void;
+  resetWorkspace: () => void;
 }
 ```
 
 ---
 
-## 3. Aturan Logika Validasi & Transisi State
+## 3. Aturan Logika Perakitan, Seleksi & Penghapusan State
 
-### A. Aturan Snapping (`snapPartToSocket`)
+### A. Grounding & Elevasi Sasis (`CHASSIS_BASE`)
+1. `CHASSIS_BASE` pertama kali di-*spawn* pada `y = CHASSIS_HALF_HEIGHT` (`0.075`) sehingga menempel rata di atas lantai (`y = 0`).
+2. Ketika kaki (`LEG_TIBIA`) tersambung ke hierarki `CHASSIS_BASE` melalui `snapPartToSocket`, fungsi `reconcileChassisElevations` menaikkan `CHASSIS_BASE` (beserta seluruh *descendant*-nya) ke `CHASSIS_ASSEMBLY_WORKING_Y` (`0.50`) dan menampilkan `AssemblyStand` selama `simulationStatus === 'idle'`.
+3. Jika seluruh kaki dilepas (`detachPart`) atau dihapus (`removePart`), `CHASSIS_BASE` otomatis turun kembali ke `y = CHASSIS_HALF_HEIGHT`.
+
+### B. Seleksi & Cascading Deletion (`selectPart`, `removePart`)
+1. Mengklik part 3D memanggil `selectPart(id)`; mengklik area kanvas kosong (`onPointerMissed`) memanggil `selectPart(null)`.
+2. `removePart(partId)` hanya berjalan saat `simulationStatus === 'idle'` dan **melindungi `CHASSIS_BASE`** agar tidak dapat dihapus.
+3. Untuk part modular (`SERVO_MG90S`, `LEG_TIBIA`, `ESP32_DEVKIT`, dll.), `removePart(partId)` melakukan **Cascading Cleanup**:
+   - Menghapus part target beserta seluruh *descendant* yang menempel padanya secara rekursif (misal menghapus servo otomatis menghapus kaki pada *horn*-nya) dan mengembalikan stoknya ke `inventory`.
+   - Membebaskan okupansi *socket* induk di `workspaceParts` agar part baru dapat di-*snap* kembali.
+   - Menghapus seluruh kabel (`wires`) dan *draft wire* yang terhubung ke pin milik part terhapus maupun *descendant*-nya.
+   - Membersihkan referensi *physics body* dan *horn ref* di `src/lib/physics/rigidBodyRegistry.ts` serta `rigidBodyRefs` / `servoAngles` di *store*, lalu mereset `selectedPartId` ke `null` jika part terpilih ikut terhapus.
+
+### C. Aturan Snapping (`snapPartToSocket`)
 1. Sebuah *socket* hanya boleh ditempati oleh maksimal **satu** komponen anak pada satu waktu.
-2. Tipe komponen yang di-*drag* (`part.type`) harus cocok dengan `acceptedPartType` milik *socket* tujuan.
-3. Saat `snapPartToSocket` dipanggil, posisi dan rotasi komponen anak dikunci mengikuti matriks transformasi dunia (*world matrix*) dari *socket* induknya.
+2. Tipe komponen yang di-*drag* (`part.type`) harus cocok dengan `allowedTypes` milik *socket* tujuan.
+3. Saat `snapPartToSocket` dipanggil, posisi dan rotasi komponen anak dikunci mengikuti matriks transformasi dunia (*world matrix*) dari *socket* induknya melalui `computeSocketWorldTransform`.
 
-### B. Aturan Validasi Rangkaian (`circuitValidator.ts`)
-Sebelum mengizinkan transisi ke `mode === 'simulate'`, fungsi `validateCircuit(parts, wires)` harus memeriksa:
-1. **Short Circuit Check:** Apakah ada kabel yang menghubungkan pin `VCC`/`5V` langsung ke `GND`? Jika ya, batalkan simulasi dan tampilkan visualisasi percikan/peringatan *Short Circuit!*.
-2. **MCU Power Check:** Apakah `ESP32_DEVKIT` sudah terhubung ke `BATTERY_2S` melalui pin `ESP_VIN` dan `ESP_GND`?
-3. **Servo Mapping:** Untuk setiap `SERVO_MG90S` yang terpasang, periksa apakah `SERVO_VCC`, `SERVO_GND`, dan `SERVO_PWM` sudah terhubung. Petakan nomor GPIO ESP32 ke `instanceId` servo terkait di dalam `pinToServoMap`.
+### D. Pre-Flight Wiring Topology Validation (`validateWiringTopology`)
+1. Berjalan setiap kali kabel atau konektivitas part berubah serta sebelum memasuki `simulationStatus === 'playing'`.
+2. **Short-Circuit & Role-Mismatch Detection:** Menelusuri graf konektivitas kabel (*BFS*) untuk mendeteksi jembatan langsung maupun transitif antara jalur daya (`POWER`) dan `GROUND`, serta pencampuran rel daya/ground dengan sinyal `PWM`.
+3. **Incomplete Power/Signal Check:** Memastikan setiap `ESP32_DEVKIT` dan `SERVO_MG90S` yang terpasang memiliki jalur `VCC` (`ESP_VIN`), `GND` (`ESP_GND`), dan sinyal `PWM` menuju pin GPIO ESP32 yang valid.
+4. Jika terdapat kesalahan, transisi ke `'playing'` diblokir, `PinNode` bermasalah berkedip merah, dan `CircuitDiagnosticAlert` menampilkan ringkasan kesalahan.
 
-### C. Konversi Sudut Servo ke Radian Fisika
-Motor servo fisik menerima input derajat $\theta_{\text{deg}} \in [0^\circ, 180^\circ]$ dengan titik tengah netral pada $90^\circ$. Saat nilai ini diteruskan ke *RevoluteJoint* di Rapier Physics, konversikan ke radian $\theta_{\text{rad}} \in [-\frac{\pi}{2}, \frac{\pi}{2}]$ menggunakan rumus:
-$$\theta_{\text{rad}} = (\theta_{\text{deg}} - 90^\circ) \times \frac{\pi}{180^\circ}$$
+### E. Deterministic Physics & Transform Reset (`stopSimulation`, `resetPositions`)
+1. Saat beralih dari `'playing'` ke `'idle'` melalui **Stop** atau **Reset**, seluruh `RapierRigidBody` di-nol-kan `linvel` dan `angvel`-nya via `resetAllRigidBodiesPhysicsState()`.
+2. Posisi dan rotasi kuaternion seluruh part anak dihitung ulang secara deterministik menggunakan matriks transformasi socket di `snapLogic.ts` & `socketRegistry.ts`, serta *joint* fisika pada `JointSystem` dan `AssemblyPhysicsJoints` dibersihkan dan dibuat ulang tanpa duplikasi.
