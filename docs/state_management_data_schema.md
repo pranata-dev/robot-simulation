@@ -9,6 +9,10 @@ export type SimulationStatus = 'idle' | 'playing' | 'paused';
 
 export type ThemeMode = 'light' | 'dark';
 
+export type RobotBlueprintId = 'spider';
+
+export type WiringMode = '3-pin' | '1-wire';
+
 export type PartType =
   | 'CHASSIS_BASE'
   | 'ESP32_DEVKIT'
@@ -66,6 +70,8 @@ export interface WiringValidationResult {
   hasShortCircuit: boolean;
   issues: readonly CircuitDiagnosticIssue[];
   faultyPinKeys: Readonly<Record<string, CircuitFaultKind>>;
+  activeServoIds: readonly string[];
+  pinToServoIds: Readonly<Partial<Record<PinId, readonly string[]>>>;
 }
 ```
 
@@ -75,8 +81,9 @@ export interface WiringValidationResult {
 
 ```typescript
 export interface SimulationData {
-  // --- Schema, Inventory & Assembly Data ---
+  // --- Schema, Blueprint, Inventory & Assembly Data ---
   schemaVersion: '1.0.0';
+  activeBlueprintId: RobotBlueprintId;
   inventory: InventoryItem[];
   workspaceParts: WorkspacePart[];
   wires: WireConnection[];
@@ -96,6 +103,11 @@ export interface SimulationData {
   simulationStatus: SimulationStatus;
   selectedPartId: string | null;
   activeSnapTarget: ActiveSnapTarget | null;
+  viewMode: 'normal' | 'wiring_xray';
+  physicsInspectorOpen: boolean;
+  wiringMode: WiringMode;
+  canUndo: boolean;
+  canRedo: boolean;
   wiringValidation: WiringValidationResult;
   showCircuitDiagnostics: boolean;
 
@@ -129,6 +141,18 @@ export interface SimulationActions {
   completeWiring: (toPartId: string, toPinId: PinId) => string | null;
   cancelWiring: () => void;
   removeWire: (wireId: string) => void;
+  setWiringMode: (mode: WiringMode) => void;
+  setViewMode: (mode: 'normal' | 'wiring_xray') => void;
+  toggleViewMode: () => void;
+  setPhysicsInspectorOpen: (open: boolean) => void;
+  togglePhysicsInspector: () => void;
+  setServoAngle: (servoId: string, angleDeg: number) => void;
+  centerAllServos: () => void;
+  startManualServoTest: () => void;
+  loadPreset: (presetId: string) => boolean;
+  setActiveBlueprint: (blueprintId: RobotBlueprintId) => void;
+  undo: () => void;
+  redo: () => void;
   dismissCircuitDiagnostics: () => void;
   setScript: (script: string) => void;
   clearScriptLogs: () => void;
@@ -176,10 +200,15 @@ export interface SimulationActions {
 
 ### D. Pre-Flight Wiring Topology Validation (`validateWiringTopology`)
 1. Berjalan setiap kali kabel atau konektivitas part berubah serta sebelum memasuki `simulationStatus === 'playing'`.
-2. **Short-Circuit & Role-Mismatch Detection:** Menelusuri graf konektivitas kabel (*BFS*) untuk mendeteksi jembatan langsung maupun transitif antara jalur daya (`POWER`) dan `GROUND`, serta pencampuran rel daya/ground dengan sinyal `PWM`.
-3. **Incomplete Power/Signal Check:** Memastikan setiap `ESP32_DEVKIT` dan `SERVO_MG90S` yang terpasang memiliki jalur `VCC` (`ESP_VIN`), `GND` (`ESP_GND`), dan sinyal `PWM` menuju pin GPIO ESP32 yang valid.
-4. Jika terdapat kesalahan, transisi ke `'playing'` diblokir, `PinNode` bermasalah berkedip merah, dan `CircuitDiagnosticAlert` menampilkan ringkasan kesalahan.
+2. **Mode `'3-pin'` vs `'1-wire'`:** Pada mode `'3-pin'` (default), seluruh terminal `VCC`, `GND`, dan `PWM` wajib terhubung lengkap dan aman; pada mode `'1-wire'`, pin daya servo disembunyikan dan validator hanya mengecek jalur `PWM` menuju pin GPIO ESP32.
+3. **Short-Circuit & Role-Mismatch Detection:** Menelusuri graf konektivitas kabel (*BFS*) untuk mendeteksi jembatan langsung maupun transitif antara jalur daya (`POWER`) dan `GROUND`, serta pencampuran rel daya/ground dengan sinyal `PWM`.
+4. **Incomplete Power/Signal Check:** Memastikan setiap `ESP32_DEVKIT` dan `SERVO_MG90S` yang terpasang memiliki jalur `VCC` (`ESP_VIN`), `GND` (`ESP_GND`), dan sinyal `PWM` menuju pin GPIO ESP32 yang valid (sesuai `wiringMode` aktif).
+5. Jika terdapat kesalahan, transisi ke `'playing'` diblokir, `PinNode` bermasalah berkedip merah, dan `CircuitDiagnosticAlert` menampilkan ringkasan kesalahan.
 
 ### E. Deterministic Physics & Transform Reset (`stopSimulation`, `resetPositions`)
 1. Saat beralih dari `'playing'` ke `'idle'` melalui **Stop** atau **Reset**, seluruh `RapierRigidBody` di-nol-kan `linvel` dan `angvel`-nya via `resetAllRigidBodiesPhysicsState()`.
 2. Posisi dan rotasi kuaternion seluruh part anak dihitung ulang secara deterministik menggunakan matriks transformasi socket di `snapLogic.ts` & `socketRegistry.ts`, serta *joint* fisika pada `JointSystem` dan `AssemblyPhysicsJoints` dibersihkan dan dibuat ulang tanpa duplikasi.
+
+### F. Multi-Robot Blueprint Resolution & LMS Embed Integration
+1. `activeBlueprintId` (default `'spider'`) menentukan dimensi sasis, BOM inventaris default, daftar socket, serta *built-in presets* melalui `src/lib/constants/socketRegistry.ts` dan `src/lib/blueprints/blueprintRegistry.ts`; memanggil `setActiveBlueprint(id)` me-reset workspace dan membangun ulang inventaris berdasarkan blueprint terpilih.
+2. Komponen `<RobotSimulatorEmbed />` (`src/components/RobotSimulatorEmbed.tsx`) menyinkronkan `allowedParts`, `presetSnapshot`, `readOnly`, dan `zeroCollisionMode` ke store melalui `setEmbedConfig`, memancarkan `onStateChange` (debounced JSON snapshot berversi `schemaVersion: "1.0.0"`), serta melaporkan `onChallengeSuccess` ketika sasis berada di dalam `TargetZoneProxy` selama 1,5 detik.

@@ -8,8 +8,9 @@ The simulator lets you assemble a spider robot from modular parts, wire microcon
 
 Key functionality implemented in the workspace:
 
-- **Socket-Snapping Assembly**: Spawn `CHASSIS_BASE`, `ESP32_DEVKIT`, `SERVO_MG90S`, and `LEG_TIBIA` parts from the inventory panel, drag them parallel to the XZ floor plane, and snap them onto compatible host sockets (`SOCKET_MCU`, `SOCKET_HIP_FL/FR/BL/BR`, and `SOCKET_SERVO_HORN`) using XZ-plane proximity checks (`SNAP_THRESHOLD = 0.5`).
-- **Interactive Pin Wiring**: Click pin nodes on the ESP32 and servos to connect `ESP_VIN`, `ESP_GND`, and eight PWM GPIO pins (`ESP_D13`, `ESP_D12`, `ESP_D14`, `ESP_D27`, `ESP_D26`, `ESP_D25`, `ESP_D33`, `ESP_D32`) to servo `SERVO_PWM`, `SERVO_VCC`, and `SERVO_GND` terminals. Press `Esc` or click empty canvas space to cancel a draft wire.
+- **Socket-Snapping Assembly & Blueprints**: Modular robot blueprint architecture (`src/lib/blueprints/`) currently configured for the 8-DOF quadruped spider (`CHASSIS_BASE`, `ESP32_DEVKIT`, `SERVO_MG90S`, `LEG_TIBIA`). Drag parts on the XZ floor plane with automatic elevation to `AssemblyStand` working height (`y = 0.5`) when legs attach, or load instant starter configs via **Load Preset** (`Empty Workbench`, `Assembled Spider (Unwired)`, `Ready-to-Walk Spider`).
+- **Interactive 3-Pin Wiring & X-Ray Mode**: Click 3D pin terminals on the ESP32 and 3-pin servo headers (`SERVO_PWM`, `SERVO_VCC`, `SERVO_GND` in `3-Pin` mode, or `PWM`-only in `1-Wire` mode) with live BFS short-circuit/topology validation. Press `W` (or click **Wiring View [W]**) to make structural parts semi-transparent and click-through while wiring, and press `Ctrl+Z` / `Ctrl+Shift+Z` for undo/redo.
+- **Manual Servo Test & Live Physics Telemetry**: Test mounted servos directly with per-servo angle sliders (`ServoCalibrationPanel.tsx`), run isolated Web Worker scripts, toggle **Physics Inspector** for live Center of Mass and ground-contact markers, and monitor mass, velocity, displacement, and estimated current (`TelemetryHUD.tsx`).
 - **Articulated Rigid-Body Physics**: Physics remain paused while dragging/wiring (`simulationStatus === 'idle'`) and step dynamically during simulation (`simulationStatus === 'playing'`). Mounted parts are connected via Rapier `useFixedJoint` and `useRevoluteJoint` constraints with collision group filtering (`interactionGroups`) between the environment (`group 0`) and robot parts (`group 1`).
 - **Sandbox Obstacles and Theme Toggle**: Spawn and reposition `OBSTACLE_BLOCK` barriers and `TARGET_ZONE` finish pads (sensor volume detecting chassis entry). Toggle between dark (`#0f172a`) and light (`#f8fafc`) environments, reset robot part positions without removing placed obstacles, or clear the full workspace.
 
@@ -95,43 +96,77 @@ LOOP
 
 ```text
 robot-simulation/
-├── docs/                                   # Design specs, coordinate maps, and state schemas
-├── public/                                 # Static SVG assets
+├── docs/                                        # Design specs, coordinate maps, and state schemas
+├── public/                                      # Static SVG assets
 └── src/
     ├── app/
     │   ├── globals.css
-    │   ├── layout.tsx                      # Root layout and font configuration
-    │   └── page.tsx                        # Main client page hosting UI overlays and 3D canvas
+    │   ├── layout.tsx                           # Root layout and font configuration
+    │   └── page.tsx                             # Main client page hosting UI overlays and 3D canvas
     ├── components/
+    │   ├── RobotSimulatorEmbed.tsx              # Embeddable LMS wrapper with grading & snapshot props
     │   ├── canvas/
     │   │   ├── parts/
-    │   │   │   ├── AnchorMarker.tsx        # Socket indicator spheres
-    │   │   │   ├── ChassisBase.tsx         # Dynamic main chassis body and sockets
-    │   │   │   ├── DraggableRigidPart.tsx  # Shared Rapier RigidBody + XZ DragControls wrapper
-    │   │   │   ├── ESP32Proxy.tsx          # ESP32 mesh and interactive pin nodes
-    │   │   │   ├── ObstacleProxy.tsx       # Fixed draggable obstacle block
-    │   │   │   ├── PinNode.tsx             # Clickable pin terminal for wiring
-    │   │   │   ├── ServoProxy.tsx          # MG90S servo proxy with horn socket and pins
-    │   │   │   ├── SpiderLegProxy.tsx      # Articulated tibia leg colliders and foot tip
-    │   │   │   └── TargetZoneProxy.tsx     # Sensor finish pad triggering level completion
-    │   │   ├── AssemblyPhysicsJoints.tsx   # Legacy imperative fixed-joint helper
-    │   │   ├── JointSystem.tsx             # Declarative Fixed/Revolute joints and motor driver
-    │   │   ├── SimulationScene.tsx         # Canvas, lights, environment, floor, and physics world
-    │   │   └── WiringSystem.tsx            # Dynamic 3D quadratic Bezier wires
+    │   │   │   ├── shared/                      # Robot-agnostic 3D parts & arena proxies
+    │   │   │   │   ├── AnchorMarker.tsx         # Socket indicator spheres
+    │   │   │   │   ├── AssemblyStand.tsx        # Semi-transparent assembly support jig & collider
+    │   │   │   │   ├── DraggableRigidPart.tsx   # Shared Rapier RigidBody + XZ DragControls wrapper
+    │   │   │   │   ├── ESP32Proxy.tsx           # ESP32 mesh and interactive power/GPIO pin nodes
+    │   │   │   │   ├── ObstacleProxy.tsx        # Fixed draggable obstacle block
+    │   │   │   │   ├── PartSelectionOverlay.tsx # Highlight bounds around selected part
+    │   │   │   │   ├── PinNode.tsx              # Clickable pin terminal for wiring
+    │   │   │   │   ├── ServoProxy.tsx           # MG90S servo proxy with horn socket and 3-pin header
+    │   │   │   │   └── TargetZoneProxy.tsx      # Sensor finish pad triggering challenge completion
+    │   │   │   └── robots/
+    │   │   │       └── spider/                  # Spider quadruped robot parts
+    │   │   │           ├── ChassisBase.tsx      # Spider chassis body, grounding & hip/MCU sockets
+    │   │   │           └── SpiderLegProxy.tsx   # Articulated tibia leg colliders and foot tip
+    │   │   ├── AssemblyPhysicsJoints.tsx        # Imperative fixed-joint helper
+    │   │   ├── CameraViewController.tsx         # Camera transitions for Wiring View & reset
+    │   │   ├── JointSystem.tsx                  # Declarative Fixed/Revolute joints and motor driver
+    │   │   ├── PerformanceMonitorGuard.tsx      # Rolling FPS tracker -> adaptive performanceMode
+    │   │   ├── PhysicsInspectorOverlay.tsx      # Live COM sphere & grounded contact indicators
+    │   │   ├── SimulationScene.tsx              # Canvas, lights, floor, Rapier world & WebGL cleanup
+    │   │   └── WiringSystem.tsx                 # Dynamic 3D quadratic Bezier jumper wires
     │   └── ui/
-    │       ├── CodeEditorPanel.tsx         # Control script textarea and Run/Stop toggle
-    │       └── InventoryPanel.tsx          # Spawner buttons, theme switch, and reset controls
+    │       ├── CanvasToolbar.tsx                # Wiring View [W], 3-Pin/1-Wire toggle, Presets, Undo/Redo
+    │       ├── CircuitDiagnosticAlert.tsx       # Short-circuit / missing-wire diagnostic banner
+    │       ├── CodeEditorPanel.tsx              # Control script editor + Manual Servo Test toggle
+    │       ├── InventoryPanel.tsx               # Allowed-part spawner, theme switch, and reset controls
+    │       ├── ServoCalibrationPanel.tsx        # Manual per-servo test sliders (Center / Start Test)
+    │       └── TelemetryHUD.tsx                 # Live mass, speed, displacement, current, COM overlay
+    ├── hooks/
+    │   ├── useKeyboardShortcuts.ts              # Undo/Redo, Delete, Esc, Wiring View [W] hotkeys
+    │   └── usePartDragAndSync.ts                # Pointer drag sync + socket snap targeting
     ├── lib/
+    │   ├── blueprints/
+    │   │   ├── blueprintRegistry.ts             # Lookup map for registered robot blueprints
+    │   │   └── spiderBlueprint.ts               # Spider dimensions, sockets, BOM counts & presets
     │   ├── constants/
-    │   │   └── socketRegistry.ts           # Part catalog, BOM quantities, sockets, and pins
-    │   └── physics/
-    │       └── rigidBodyRegistry.ts        # Imperative RigidBody lookup helper
+    │   │   ├── hardwareCatalog.ts               # Shared part specs, pin roles, and wire colors
+    │   │   └── socketRegistry.ts                # Central blueprint-aware socket/preset resolver
+    │   ├── microcontroller/
+    │   │   ├── circuitValidator.ts              # BFS short-circuit and 3-pin/1-wire topology checks
+    │   │   └── servoPinMap.ts                   # PIN_1..8 / ESP_D* pin mapping helpers
+    │   ├── physics/
+    │   │   ├── rigidBodyRegistry.ts             # Imperative RigidBody/horn lookup & velocity reset
+    │   │   └── telemetryState.ts                # Zero-GC frame telemetry calculation helper
+    │   ├── snapshot/
+    │   │   ├── presets.ts                       # Built-in workbench & Ready-to-Walk presets
+    │   │   └── snapshotSerializer.ts            # Schema 1.0.0 export/import JSON validator
+    │   ├── three/
+    │   │   └── disposeSceneResources.ts         # Recursive Three.js WebGL resource disposal
+    │   └── worker/
+    │       └── createRobotScriptWorker.ts       # Inline Blob Web Worker factory for script sandbox
     ├── store/
-    │   └── useSimulationStore.ts           # Zustand store for parts, wires, script, and theme
+    │   └── useSimulationStore.ts                # Zustand store (parts, wires, blueprint, script, history)
     ├── types/
-    │   └── simulator.ts                    # Shared TypeScript interfaces and union types
-    └── utils/
-        └── snapLogic.ts                    # XZ-plane socket proximity and world transforms
+    │   └── simulator.ts                         # Shared TypeScript interfaces and union types
+    ├── utils/
+    │   ├── snapLogic.ts                         # XZ-plane socket proximity & hierarchy resolver
+    │   └── transformMath.ts                     # Pure world transform math for sockets & presets
+    └── workers/
+        └── robotScriptWorker.ts                 # Isolated script worker with watchdog & quota guard
 ```
 
 ## Architecture Notes

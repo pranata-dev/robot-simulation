@@ -20,7 +20,8 @@ Dokumen ini adalah referensi spasial mutlak untuk AI saat menyusun posisi kompon
 
 ---
 
-## 1A. Chassis Grounding & Assembly Support Jig Constants (`socketRegistry.ts`)
+## 1A. Multi-Robot Blueprint & Chassis Grounding Constants (`spiderBlueprint.ts` + `socketRegistry.ts`)
+- **Arsitektur Blueprint Modular:** Definisi khusus robot laba-laba (dimensi sasis, daftar socket, BOM inventaris default, dan *built-in presets*) didefinisikan di `src/lib/blueprints/spiderBlueprint.ts` sebagai objek `SPIDER_BLUEPRINT: RobotBlueprintConfig`, sedangkan katalog hardware/pin bersama berada di `src/lib/constants/hardwareCatalog.ts`. File `src/lib/constants/socketRegistry.ts` menjadi *resolver* pusat yang membaca `activeBlueprintId` (`'spider'`) dari `useSimulationStore.ts`.
 - **Formula Grounding Dasar (`CHASSIS_HALF_HEIGHT`):**
   - `CHASSIS_DIMENSIONS` $= [1.20, 0.15, 1.60]$
   - `CHASSIS_HALF_HEIGHT` $= \frac{0.15}{2} = 0.075$
@@ -100,8 +101,10 @@ Setiap komponen yang dipasang memiliki *child socket* untuk komponen berikutnya:
 | `ESP_D33` | `GPIO 33` | PWM Output (Default: Hip BR) | $[0.12, 0.05, -0.02]$ | Kuning (`#eab308`) |
 | `ESP_D32` | `GPIO 32` | PWM Output (Default: Knee BR) | $[0.12, 0.05, -0.08]$ | Kuning (`#eab308`) |
 
-### B. Pin pada Setiap Instance `SERVO_MG90S`
-Setiap motor servo yang ditempatkan di *scene* memiliki 3 pin input di sisi kabelnya:
-- `SERVO_PWM` di $[0.00, -0.10, -0.08]$ (Oranye `#f97316`) $\rightarrow$ Harus terhubung ke salah satu pin `GPIO` ESP32.
-- `SERVO_VCC` di $[0.00, -0.10, -0.06]$ (Merah `#ef4444`) $\rightarrow$ Harus terhubung ke jalur $5\text{ V}$ (`BAT_5V` atau *Power Rail*).
-- `SERVO_GND` di $[0.00, -0.10, -0.04]$ (Cokelat/Hitam `#1f2937`) $\rightarrow$ Harus terhubung ke jalur `GND`.
+### B. Pin pada Setiap Instance `SERVO_MG90S` (`3-pin` vs. `1-wire` Mode)
+Setiap motor servo yang ditempatkan di *scene* (`ServoProxy.tsx`) memiliki header 3-pin pada tepi atas-belakang (`y = 0.125, z = -0.105`) agar terpisah jelas dari sasis dan horn/kaki yang berputar:
+- `SERVO_PWM` (`${partId}_PWM`) di $[-0.08, 0.125, -0.105]$ (Amber `#f59e0b`) $\rightarrow$ Terhubung ke salah satu pin GPIO ESP32 (`P1`–`P8`).
+- `SERVO_VCC` (`${partId}_VCC`) di $[0.00, 0.125, -0.105]$ (Merah `#ef4444`) $\rightarrow$ Terhubung ke jalur $5\text{ V}$ ESP32 (`ESP_VIN` atau *daisy-chain* VCC). Disembunyikan saat `wiringMode === '1-wire'`.
+- `SERVO_GND` (`${partId}_GND`) di $[0.08, 0.125, -0.105]$ (Slate/Hitam `#475569` dengan *light rim*) $\rightarrow$ Terhubung ke jalur `GND` ESP32 (`ESP_GND` atau *daisy-chain* GND). Disembunyikan saat `wiringMode === '1-wire'`.
+
+> **Catatan `WiringMode`:** Pada mode `'3-pin'` (default), seluruh jalur `PWM`, `VCC`, dan `GND` harus terhubung valid tanpa *short circuit*. Pada mode `'1-wire'`, hanya pin `SERVO_PWM` yang dirender dan divalidasi menuju pin GPIO ESP32.

@@ -4,67 +4,54 @@
 
 ---
 
-## Fase 1: Foundation, Physics Lab & State Store
-**Tujuan:** Menyiapkan arsitektur Next.js, *store* Zustand, halaman simulasi fisika dasar (bidang miring & tumbukan), serta *workspace* 3D untuk laboratorium robotika.
+## Fase 1: Foundation, Physics Sandbox & State Store
+**Tujuan:** Menyiapkan arsitektur Next.js, *store* Zustand, simulasi arena fisika (`ObstacleProxy`, `TargetZoneProxy`), serta *workspace* 3D laboratorium robotika.
 
 **Deliverables:**
-- `src/types/simulator.ts` & `src/store/useSimulatorStore.ts`
-- `src/components/canvas/SceneContainer.tsx` (Dilengkapi `OrbitControls`, `Grid`, pencahayaan, dan pembungkus `<Physics>` dari `@react-three/rapier`)
-- `src/components/canvas/physics/InclinedPlaneLab.tsx` (Simulasi balok meluncur di bidang miring dengan kontrol sudut $\theta$, massa $m$, dan koefisien gesek $\mu$)
-- `src/components/ui/TopToolbar.tsx`
-
-**Prompt untuk Antigravity IDE:**
-> *"Baca file `@project-brief.md`, `@tech-stack-and-architecture.md`, dan `@state-management.md`. Kerjakan **Fase 1** dari `@roadmap-phases.md`. Buat definisi tipe TypeScript, Zustand store lengkap, serta SceneContainer R3F. Sediakan toggle di UI untuk berpindah antara 'Physics Sandbox Lab' (simulasi balok pada bidang miring interaktif menggunakan Rapier) dan 'Spider Robotics Lab'."*
+- `src/types/simulator.ts` & `src/store/useSimulationStore.ts`
+- `src/components/canvas/SimulationScene.tsx` (Dilengkapi `OrbitControls`, `Grid`, pencahayaan, `<Physics>` dari `@react-three/rapier`, serta cleanup memori WebGL melalui `src/lib/three/disposeSceneResources.ts`)
+- `src/components/canvas/parts/shared/ObstacleProxy.tsx` & `src/components/canvas/parts/shared/TargetZoneProxy.tsx`
+- `src/components/ui/InventoryPanel.tsx` & `src/components/ui/CanvasToolbar.tsx`
 
 ---
 
-## Fase 2: Procedural 3D Robot Parts & Magnetic Snapping
-**Tujuan:** Membangun komponen 3D untuk ke-6 jenis *part* robot (`CHASSIS_BASE`, `ESP32_DEVKIT`, `BATTERY_2S`, `SERVO_MG90S`, `LEG_COXA`, `LEG_TIBIA`) beserta sistem *drag-and-drop* dan *magnetic socket snapping*.
+## Fase 2: Multi-Robot Blueprints, 3D Robot Parts & Magnetic Snapping
+**Tujuan:** Membangun komponen 3D modular lintas-robot (`parts/shared/` dan `parts/robots/spider/`) beserta sistem *drag-and-drop*, *assembly stand* otomatis, dan *magnetic socket snapping*.
 
 **Deliverables:**
-- `src/lib/constants/socketRegistry.ts` (Implementasi koordinat dari `3d-asset-map.md`)
-- Komponen *mesh* prosedural di `src/components/canvas/parts/*` yang tampak detail dan mekanis.
-- `src/components/canvas/assembly/SocketIndicator.tsx` (Menampilkan bola transparan hijau menyala saat *user* menarik *part* yang kompatibel di dekat *socket*).
-- Fitur tombol **"Load Complete Spider Preset"** di UI agar kita bisa langsung merakit seluruh robot secara otomatis dengan 1 klik untuk mempercepat pengujian fase berikutnya.
-
-**Prompt untuk Antigravity IDE:**
-> *"Berdasarkan `@3d-asset-map.md` dan `@state-management.md`, kerjakan **Fase 2** dari `@roadmap-phases.md`. Bangun komponen Procedural 3D Mesh untuk seluruh part robot laba-laba beserta hirarki socket-nya. Implementasikan fitur 3D drag-and-drop pada `ASSEMBLY_MODE` di mana part akan otomatis snap ke socket yang kompatibel jika jaraknya $d < 0.25\text{ unit}$. Tambahkan juga tombol 'Auto-Assemble Robot' di UI."*
+- `src/lib/blueprints/spiderBlueprint.ts`, `src/lib/blueprints/blueprintRegistry.ts`, `src/lib/constants/hardwareCatalog.ts`, & `src/lib/constants/socketRegistry.ts`
+- Komponen *mesh* prosedural di `src/components/canvas/parts/shared/*` (`ESP32Proxy.tsx`, `ServoProxy.tsx`, `DraggableRigidPart.tsx`, `AssemblyStand.tsx`) dan `src/components/canvas/parts/robots/spider/*` (`ChassisBase.tsx`, `SpiderLegProxy.tsx`)
+- `src/components/canvas/parts/shared/AnchorMarker.tsx` & `src/hooks/usePartDragAndSync.ts`
+- `src/lib/snapshot/presets.ts` & **"Load Preset"** di `CanvasToolbar.tsx` (`Empty Workbench`, `Assembled Spider (Unwired)`, `Ready-to-Walk Spider`)
 
 ---
 
-## Fase 3: 3D Interactive Pin-to-Pin Wiring System
-**Tujuan:** Mengizinkan pengguna menyambungkan kabel jumper 3D antara pin GPIO ESP32, baterai, dan motor servo.
+## Fase 3: 3D Interactive 3-Pin Wiring System & X-Ray Mode
+**Tujuan:** Mengizinkan pengguna menyambungkan kabel jumper 3D antara pin daya/GPIO ESP32 dan header 3-pin servo (`PWM`, `VCC`, `GND`) dengan validasi topologi rangkaian sebelum simulasi berjalan.
 
 **Deliverables:**
-- `src/components/canvas/wiring/PinNode.tsx` (Titik *mesh* kecil di atas ESP32 dan Servo yang memunculkan *tooltip* nama pin saat di-*hover* dan bisa diklik saat `WIRING_MODE`).
-- `src/components/canvas/wiring/WireCurve3D.tsx` (Menggambar kabel melengkung yang realistis menggunakan `<QuadraticBezierLine>` dari `@react-three/drei` dengan titik kontrol tengah yang ditinggikan pada sumbu $+Y$ agar kabel tidak menembus *mesh* sasis).
-- `src/lib/microcontroller/circuitValidator.ts` & tombol **"Auto-Wire Default Pins"** di UI.
-
-**Prompt untuk Antigravity IDE:**
-> *"Kerjakan **Fase 3** dari `@roadmap-phases.md` dengan mengacu pada koordinat pin di `@3d-asset-map.md`. Buat sistem `WIRING_MODE` di mana user bisa mengklik Pin A lalu Pin B untuk membuat koneksi kabel 3D menggunakan `QuadraticBezierLine`. Tambahkan panel `WiringInspector` di UI, logika `circuitValidator.ts` untuk mendeteksi short-circuit atau pin yang belum terhubung, serta tombol 'Auto-Wire Preset'."*
+- `src/components/canvas/parts/shared/PinNode.tsx` & 3-pin header (`${partId}_PWM`, `${partId}_VCC`, `${partId}_GND`) pada `ServoProxy.tsx`
+- `src/components/canvas/WiringSystem.tsx` (Kabel `<QuadraticBezierLine>` 3D dengan dukungan *wiring mode* `'3-pin'` dan `'1-wire'`)
+- `src/lib/microcontroller/circuitValidator.ts` & `src/components/ui/CircuitDiagnosticAlert.tsx`
+- **Wiring View (`W`)** pada `SimulationScene.tsx` & `CameraViewController.tsx` (membuat mesh struktural semi-transparan non-raycast agar pin mudah diklik)
 
 ---
 
-## Fase 4: Rapier Physics Rig & Revolute Joint Actuation
-**Tujuan:** Mengubah robot yang sudah dirakit menjadi struktur fisik aktif di `@react-three/rapier` yang digerakkan oleh sendi motor (*Revolute Joint*).
+## Fase 4: Rapier Physics Rig, Revolute Joints & Live Telemetry
+**Tujuan:** Mengubah robot yang sudah dirakit menjadi struktur fisik aktif di `@react-three/rapier` yang digerakkan oleh sendi motor (*Fixed & Revolute Joints*) dengan inspeksi telemetri *real-time*.
 
 **Deliverables:**
-- `src/components/canvas/physics/AssembledRobotRig.tsx`
-- Integrasi *joint* atau kontrol sudut kinematik untuk 8 servo (4 *Hip* + 4 *Knee*).
-- Panel penguji manual (*Servo Sliders* $0^\circ - 180^\circ$) di *Telemetry HUD* untuk menguji gerakan tiap kaki secara *real-time* saat berada di `SIMULATION_MODE`.
-
-**Prompt untuk Antigravity IDE:**
-> *"Kerjakan **Fase 4** dari `@roadmap-phases.md`. Buat komponen `AssembledRobotRig.tsx` yang aktif saat `mode === 'simulate'`. Pastikan robot berinteraksi dengan gravitasi dan lantai Rapier Physics, serta hubungkan ke-8 motor servo dengan `servoTargetAngles` di Zustand store. Sediakan panel slider manual ($0^\circ$ sampai $180^\circ$) di UI untuk menguji gerakan masing-masing sendi kaki secara langsung."*
+- `src/components/canvas/JointSystem.tsx`, `src/components/canvas/AssemblyPhysicsJoints.tsx`, & `src/lib/physics/rigidBodyRegistry.ts`
+- `src/components/ui/ServoCalibrationPanel.tsx` (*Manual Servo Test* slider $0^\circ$–$180^\circ$ / $-180^\circ$–$180^\circ$ untuk menguji gerakan sendi secara langsung)
+- `src/components/ui/TelemetryHUD.tsx`, `src/lib/physics/telemetryState.ts`, & `src/components/canvas/PhysicsInspectorOverlay.tsx` (Menampilkan massa, kecepatan, perpindahan, arus `mA`, Center of Mass, dan kontak lantai kaki)
 
 ---
 
-## Fase 5: Virtual Microcontroller IDE & Tripod Gait Walking
-**Tujuan:** Menyediakan editor kode di dalam web dan algoritma jalan laba-laba (*Tripod / Tetrapod Gait*) sehingga pengguna bisa memprogram robotnya untuk berjalan maju, mundur, dan berbelok.
+## Fase 5: Worker-Isolated Code IDE, Snapshot Serialization & LMS Embed
+**Tujuan:** Menjalankan skrip kontrol robot secara aman di Web Worker terisolasi dan membungkus simulator sebagai modul *plug-and-play* untuk platform *e-learning* Next.js.
 
 **Deliverables:**
-- `src/components/ui/CodeEditorDrawer.tsx`
-- `src/lib/microcontroller/sandboxRunner.ts` (Mengeksekusi fungsi asinkron pengguna seperti `await setServo(pin, angle)` dan `await delay(ms)` serta perintah tingkat tinggi seperti `await walkForward(steps)`).
-- `src/lib/kinematics/spiderGait.ts` (Sekuen langkah kaki diagonal: mengangkat pasangan kaki $\text{FL} + \text{BR}$, mengayun ke depan, menurunkan, lalu bergantian dengan $\text{FR} + \text{BL}$).
-
-**Prompt untuk Antigravity IDE:**
-> *"Kerjakan **Fase 5** dari `@roadmap-phases.md`. Buat `CodeEditorDrawer.tsx` dan `sandboxRunner.ts` agar user dapat menulis kode JavaScript/Arduino-style untuk mengontrol pin GPIO ESP32. Sediakan template kode bawaan di editor yang mengimplementasikan algoritma jalan 'Quadruped Diagonal Gait' sehingga ketika user menekan tombol 'Run Code' di `SIMULATION_MODE`, robot laba-laba benar-benar melangkah maju di atas lantai."*
+- `src/components/ui/CodeEditorPanel.tsx`, `src/workers/robotScriptWorker.ts`, & `src/lib/worker/createRobotScriptWorker.ts` (Dilengkapi *watchdog timer* dan batas kuota iterasi)
+- `src/lib/microcontroller/servoPinMap.ts` (Pemetaan perintah `PIN_1..8` & `ESP_D*` serta template *Quadruped Gait* bawaan pada preset *Ready-to-Walk*)
+- `src/lib/snapshot/snapshotSerializer.ts` (`exportSimulationSnapshot` & `importSimulationSnapshot` berversi `schemaVersion: "1.0.0"` + *Undo/Redo* history stack)
+- `src/components/RobotSimulatorEmbed.tsx` (Mendukung `allowedParts`, `presetSnapshot`, `readOnly`, `zeroCollisionMode`, `onStateChange`, dan `onChallengeSuccess`)
