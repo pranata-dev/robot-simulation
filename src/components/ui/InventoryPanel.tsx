@@ -14,8 +14,18 @@ function PartIcon({ type }: { type: PartType }) {
   return <Cpu className="h-4 w-4 shrink-0" />;
 }
 
-export default function InventoryPanel() {
+interface InventoryPanelProps {
+  allowedParts?: PartType[];
+  readOnly?: boolean;
+}
+
+export default function InventoryPanel({
+  allowedParts: allowedPartsProp,
+  readOnly: readOnlyProp,
+}: InventoryPanelProps = {}) {
   const inventory = useSimulationStore((state) => state.inventory);
+  const storeAllowedParts = useSimulationStore((state) => state.allowedParts);
+  const storeReadOnly = useSimulationStore((state) => state.readOnly);
   const workspacePartsCount = useSimulationStore((state) => state.workspaceParts.length);
   const simulationStatus = useSimulationStore((state) => state.simulationStatus);
   const theme = useSimulationStore((state) => state.theme);
@@ -24,7 +34,13 @@ export default function InventoryPanel() {
   const resetPositions = useSimulationStore((state) => state.resetPositions);
   const resetWorkspace = useSimulationStore((state) => state.resetWorkspace);
 
+  const effectiveAllowedParts = allowedPartsProp ?? storeAllowedParts;
+  const isReadOnly = readOnlyProp ?? storeReadOnly;
+  const visibleInventory = effectiveAllowedParts
+    ? inventory.filter((item) => effectiveAllowedParts.includes(item.type))
+    : inventory;
   const isIdle = simulationStatus === 'idle';
+  const canEditAssembly = isIdle && !isReadOnly;
 
   return (
     <aside
@@ -61,8 +77,8 @@ export default function InventoryPanel() {
           <button
             type="button"
             onClick={resetWorkspace}
-            disabled={!isIdle || workspacePartsCount === 0}
-            title="Clear Workspace"
+            disabled={!canEditAssembly || workspacePartsCount === 0}
+            title={isReadOnly ? 'Disabled in read-only mode' : 'Clear Workspace'}
             aria-label="Clear Workspace"
             className="rounded-lg border border-[#827148]/25 bg-[#FFEED6] p-1.5 text-[#827148] transition-colors hover:bg-[#E8A07C] hover:text-[#FFEED6] disabled:cursor-not-allowed disabled:opacity-40"
           >
@@ -72,8 +88,8 @@ export default function InventoryPanel() {
       </div>
 
       <div className="flex flex-col gap-2">
-        {inventory.map((item) => {
-          const canSpawn = isIdle && item.quantity > 0;
+        {visibleInventory.map((item) => {
+          const canSpawn = canEditAssembly && item.quantity > 0;
           return (
             <button
               key={item.type}

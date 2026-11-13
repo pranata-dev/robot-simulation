@@ -1,6 +1,7 @@
 'use client';
 
 import dynamic from 'next/dynamic';
+import CircuitDiagnosticAlert from '@/components/ui/CircuitDiagnosticAlert';
 import CodeEditorPanel from '@/components/ui/CodeEditorPanel';
 import InventoryPanel from '@/components/ui/InventoryPanel';
 import { useSimulationStore } from '@/store/useSimulationStore';
@@ -19,6 +20,7 @@ export default function Home() {
       }`}
     >
       <InventoryPanel />
+      <CircuitDiagnosticAlert />
       <CodeEditorPanel />
       <SimulationScene />
     </main>
