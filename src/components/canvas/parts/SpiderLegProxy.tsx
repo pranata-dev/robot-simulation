@@ -1,0 +1,134 @@
+'use client';
+
+import { memo, useEffect, useRef } from 'react';
+import {
+  BallCollider,
+  CuboidCollider,
+  type RapierRigidBody,
+  interactionGroups,
+} from '@react-three/rapier';
+import AnchorMarker from '@/components/canvas/parts/AnchorMarker';
+import DraggableRigidPart from '@/components/canvas/parts/DraggableRigidPart';
+import { useSimulationStore } from '@/store/useSimulationStore';
+import type { Vector3Tuple } from '@/types/simulator';
+
+interface SpiderLegProxyProps {
+  id: string;
+  position: Vector3Tuple;
+  rotation?: Vector3Tuple;
+  attachedTo?: string;
+}
+
+const DEFAULT_ROTATION: Vector3Tuple = [0, 0, 0];
+
+/** Tibia tilts from knee [0, 0.04, 0.34] down to rubber foot tip [0, -0.34, 0.50]. */
+const KNEE_POS: Vector3Tuple = [0, 0.04, 0.34];
+const FOOT_TIP_POS: Vector3Tuple = [0, -0.34, 0.5];
+const FOOT_RADIUS = 0.045;
+const TIBIA_LENGTH = Math.hypot(FOOT_TIP_POS[2] - KNEE_POS[2], KNEE_POS[1] - FOOT_TIP_POS[1]);
+const TIBIA_TILT_X = -Math.atan2(FOOT_TIP_POS[2] - KNEE_POS[2], KNEE_POS[1] - FOOT_TIP_POS[1]);
+const FEMUR_LENGTH = 0.34;
+const FEMUR_TILT_X = Math.PI / 2 - Math.atan2(KNEE_POS[1], KNEE_POS[2]);
+
+function SpiderLegProxy({
+  id,
+  position,
+  rotation = DEFAULT_ROTATION,
+  attachedTo,
+}: SpiderLegProxyProps) {
+  const rigidBodyRef = useRef<RapierRigidBody | null>(null);
+  const registerRigidBody = useSimulationStore((state) => state.registerRigidBody);
+  const unregisterRigidBody = useSimulationStore((state) => state.unregisterRigidBody);
+
+  useEffect(() => {
+    registerRigidBody(id, rigidBodyRef);
+    return () => {
+      unregisterRigidBody(id, rigidBodyRef);
+    };
+  }, [id, registerRigidBody, unregisterRigidBody]);
+
+  return (
+    <DraggableRigidPart
+      id={id}
+      partType="LEG_TIBIA"
+      position={position}
+      rotation={rotation}
+      attachedTo={attachedTo}
+      enableSnapping
+      includeDefaultCollider={false}
+      linearDamping={0.15}
+      angularDamping={0.35}
+      rigidBodyTypeOverride="dynamic"
+      collisionGroups={interactionGroups(1, [0])}
+      rigidBodyRef={rigidBodyRef}
+    >
+      {/* Articulated L-shaped colliders clear of the [0, 0, 0] servo horn pivot */}
+      <CuboidCollider
+        args={[0.028, 0.028, 0.13]}
+        position={[0, 0.02, 0.21]}
+        mass={0.008}
+        friction={0.6}
+      />
+      <CuboidCollider
+        args={[0.024, TIBIA_LENGTH / 2 - 0.02, 0.024]}
+        position={[0, -0.15, 0.42]}
+        rotation={[TIBIA_TILT_X, 0, 0]}
+        mass={0.01}
+        friction={0.6}
+      />
+      <BallCollider
+        args={[FOOT_RADIUS]}
+        position={FOOT_TIP_POS}
+        mass={0.012}
+        friction={1.6}
+        restitution={0.05}
+      />
+
+      {/* Red sphere socket marking top servo-horn attachment joint */}
+      <AnchorMarker name="LEG_HIP_MOUNT" position={[0, 0, 0]} color="#ef4444" />
+
+      {/* Upper mounting hub */}
+      <mesh castShadow receiveShadow>
+        <cylinderGeometry args={[0.042, 0.042, 0.03, 16]} />
+        <meshStandardMaterial color="#827148" roughness={0.45} metalness={0.2} />
+      </mesh>
+
+      {/* Upper femur strut */}
+      <mesh
+        castShadow
+        receiveShadow
+        position={[0, 0.02, 0.17]}
+        rotation={[FEMUR_TILT_X, 0, 0]}
+      >
+        <cylinderGeometry args={[0.024, 0.024, FEMUR_LENGTH, 16]} />
+        <meshStandardMaterial color="#A5AF79" roughness={0.5} metalness={0.2} />
+      </mesh>
+
+      {/* Knee joint hub */}
+      <mesh castShadow receiveShadow position={KNEE_POS}>
+        <sphereGeometry args={[0.038, 16, 16]} />
+        <meshStandardMaterial color="#827148" roughness={0.4} metalness={0.3} />
+      </mesh>
+
+      {/* Lower tibia leg cylinder */}
+      <mesh
+        castShadow
+        receiveShadow
+        position={[0, -0.15, 0.42]}
+        rotation={[TIBIA_TILT_X, 0, 0]}
+      >
+        <cylinderGeometry args={[0.022, 0.016, TIBIA_LENGTH, 16]} />
+        <meshStandardMaterial color="#E8A07C" roughness={0.45} metalness={0.15} />
+      </mesh>
+
+      {/* High-friction rubber foot tip */}
+      <mesh castShadow receiveShadow position={FOOT_TIP_POS}>
+        <sphereGeometry args={[FOOT_RADIUS, 16, 16]} />
+        <meshStandardMaterial color="#1f2937" roughness={0.9} />
+      </mesh>
+    </DraggableRigidPart>
+  );
+}
+
+export default memo(SpiderLegProxy);
+
