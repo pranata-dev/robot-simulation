@@ -1,6 +1,7 @@
 'use client';
 
-import { memo } from 'react';
+import { memo, useEffect, useRef } from 'react';
+import { useFrame } from '@react-three/fiber';
 import { CuboidCollider, interactionGroups } from '@react-three/rapier';
 import DraggableRigidPart from '@/components/canvas/parts/DraggableRigidPart';
 import { PART_CATALOG } from '@/lib/constants/socketRegistry';
@@ -17,13 +18,56 @@ const { dimensions } = PART_CATALOG.TARGET_ZONE;
 const [WIDTH, HEIGHT, DEPTH] = dimensions;
 const SENSOR_HALF_HEIGHT = 0.65;
 const TARGET_COLLISION_GROUPS = interactionGroups(0, [0, 1]);
+const REQUIRED_DWELL_SECONDS = 1.5;
+
+function isChassisIntersection(payload: {
+  other: {
+    rigidBodyObject?: { userData?: Record<string, unknown> } | null;
+    colliderObject?: { userData?: Record<string, unknown> } | null;
+  };
+}): boolean {
+  return (
+    payload.other.rigidBodyObject?.userData?.type === 'chassis' ||
+    payload.other.rigidBodyObject?.userData?.partType === 'CHASSIS_BASE' ||
+    payload.other.colliderObject?.userData?.type === 'chassis'
+  );
+}
 
 function TargetZoneProxy({ id, position, rotation }: TargetZoneProxyProps) {
+  const challengeStatus = useSimulationStore((state) => state.challengeStatus);
+  const simulationStatus = useSimulationStore((state) => state.simulationStatus);
   const isLevelComplete = useSimulationStore((state) => state.isLevelComplete);
-  const completeLevel = useSimulationStore((state) => state.completeLevel);
+  const completeChallenge = useSimulationStore((state) => state.completeChallenge);
 
-  const primaryColor = isLevelComplete ? '#facc15' : '#10b981';
-  const emissiveColor = isLevelComplete ? '#eab308' : '#059669';
+  const isChassisInsideRef = useRef(false);
+  const dwellSecondsRef = useRef(0);
+
+  useEffect(() => {
+    if (simulationStatus !== 'playing') {
+      isChassisInsideRef.current = false;
+      dwellSecondsRef.current = 0;
+    }
+  }, [simulationStatus]);
+
+  useFrame((_, delta) => {
+    if (
+      !isChassisInsideRef.current ||
+      simulationStatus !== 'playing' ||
+      challengeStatus !== 'in_progress'
+    ) {
+      return;
+    }
+
+    dwellSecondsRef.current += Math.min(delta, 0.1);
+    if (dwellSecondsRef.current >= REQUIRED_DWELL_SECONDS) {
+      isChassisInsideRef.current = false;
+      completeChallenge();
+    }
+  });
+
+  const isCompleted = isLevelComplete || challengeStatus === 'completed';
+  const primaryColor = isCompleted ? '#facc15' : '#10b981';
+  const emissiveColor = isCompleted ? '#eab308' : '#059669';
 
   return (
     <DraggableRigidPart
@@ -36,12 +80,14 @@ function TargetZoneProxy({ id, position, rotation }: TargetZoneProxyProps) {
       sensor
       collisionGroups={TARGET_COLLISION_GROUPS}
       onIntersectionEnter={(e) => {
-        if (
-          e.colliderObject?.userData?.type === 'chassis' ||
-          e.rigidBodyObject?.userData?.type === 'chassis' ||
-          e.other.rigidBodyObject?.userData?.type === 'chassis'
-        ) {
-          completeLevel();
+        if (isChassisIntersection(e)) {
+          isChassisInsideRef.current = true;
+        }
+      }}
+      onIntersectionExit={(e) => {
+        if (isChassisIntersection(e)) {
+          isChassisInsideRef.current = false;
+          dwellSecondsRef.current = 0;
         }
       }}
     >
@@ -58,7 +104,7 @@ function TargetZoneProxy({ id, position, rotation }: TargetZoneProxyProps) {
         <meshStandardMaterial
           color={primaryColor}
           emissive={emissiveColor}
-          emissiveIntensity={isLevelComplete ? 0.95 : 0.55}
+          emissiveIntensity={isCompleted ? 0.95 : 0.55}
           roughness={0.3}
           metalness={0.25}
         />

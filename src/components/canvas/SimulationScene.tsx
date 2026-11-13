@@ -1,9 +1,10 @@
 'use client';
 
-import { Suspense } from 'react';
+import { Suspense, useEffect, useRef } from 'react';
 import { Canvas } from '@react-three/fiber';
 import { ContactShadows, Environment, OrbitControls } from '@react-three/drei';
 import { CuboidCollider, Physics, RigidBody, interactionGroups } from '@react-three/rapier';
+import type * as THREE from 'three';
 import ChassisBase from '@/components/canvas/parts/ChassisBase';
 import ESP32Proxy from '@/components/canvas/parts/ESP32Proxy';
 import ObstacleProxy from '@/components/canvas/parts/ObstacleProxy';
@@ -11,7 +12,11 @@ import ServoProxy from '@/components/canvas/parts/ServoProxy';
 import SpiderLegProxy from '@/components/canvas/parts/SpiderLegProxy';
 import TargetZoneProxy from '@/components/canvas/parts/TargetZoneProxy';
 import JointSystem from '@/components/canvas/JointSystem';
+import PerformanceMonitorGuard from '@/components/canvas/PerformanceMonitorGuard';
 import WiringSystem from '@/components/canvas/WiringSystem';
+import { useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts';
+import { clearPhysicsRegistry } from '@/lib/physics/rigidBodyRegistry';
+import { disposeSceneResources } from '@/lib/three/disposeSceneResources';
 import { useSimulationStore } from '@/store/useSimulationStore';
 import type { ThemeMode, Vector3Tuple } from '@/types/simulator';
 
@@ -126,7 +131,7 @@ function Floor({ theme }: { theme: ThemeMode }) {
   );
 }
 
-function Lights({ theme }: { theme: ThemeMode }) {
+function Lights({ theme, shadowsEnabled }: { theme: ThemeMode; shadowsEnabled: boolean }) {
   const isDark = theme === 'dark';
 
   return (
@@ -135,7 +140,7 @@ function Lights({ theme }: { theme: ThemeMode }) {
       <directionalLight
         position={[6, 10, 4]}
         intensity={isDark ? 1.05 : 1.4}
-        castShadow
+        castShadow={shadowsEnabled}
         shadow-mapSize-width={2048}
         shadow-mapSize-height={2048}
         shadow-camera-near={0.5}
@@ -151,46 +156,91 @@ function Lights({ theme }: { theme: ThemeMode }) {
 }
 
 export default function SimulationScene() {
+  useKeyboardShortcuts();
   const isPhysicsPaused = useSimulationStore((state) => state.simulationStatus !== 'playing');
+  const resetNonce = useSimulationStore((state) => state.resetNonce);
   const theme = useSimulationStore((state) => state.theme);
+  const performanceMode = useSimulationStore((state) => state.performanceMode);
   const isDark = theme === 'dark';
+  const glRef = useRef<THREE.WebGLRenderer | null>(null);
+  const sceneRef = useRef<THREE.Scene | null>(null);
+
+  useEffect(() => {
+    return () => {
+      const store = useSimulationStore.getState();
+      store.stopSimulation();
+      store.setPerformanceMode(false);
+      clearPhysicsRegistry();
+      if (sceneRef.current) {
+        disposeSceneResources(sceneRef.current);
+        sceneRef.current = null;
+      }
+      if (glRef.current) {
+        glRef.current.renderLists.dispose();
+        glRef.current = null;
+      }
+    };
+  }, []);
 
   return (
-    <Canvas
-      shadows
-      dpr={[1, 2]}
-      camera={{ position: CAMERA_POSITION, fov: 50, near: 0.05, far: 200 }}
-      gl={{ antialias: true }}
-      onPointerMissed={() => useSimulationStore.getState().cancelWiring()}
-    >
-      <color attach="background" args={[isDark ? '#0f172a' : '#f8fafc']} />
-      <Lights theme={theme} />
+    <div className="relative h-full w-full">
+      <Canvas
+        shadows={!performanceMode}
+        dpr={performanceMode ? [1, 1] : [1, 2]}
+        camera={{ position: CAMERA_POSITION, fov: 50, near: 0.05, far: 200 }}
+        gl={{ antialias: true }}
+        onCreated={({ gl, scene }) => {
+          glRef.current = gl;
+          sceneRef.current = scene;
+        }}
+        onPointerMissed={() => {
+          const store = useSimulationStore.getState();
+          store.cancelWiring();
+          store.selectPart(null);
+        }}
+      >
+        <color attach="background" args={[isDark ? '#0f172a' : '#f8fafc']} />
+        <Lights theme={theme} shadowsEnabled={!performanceMode} />
+        <PerformanceMonitorGuard />
 
-      <gridHelper
-        args={[FLOOR_SIZE, FLOOR_SIZE * 2, isDark ? '#334155' : '#cbd5e1', isDark ? '#1e293b' : '#e2e8f0']}
-        position={[0, 0.0005, 0]}
-      />
-      <ContactShadows
-        resolution={1024}
-        scale={20}
-        blur={2}
-        opacity={isDark ? 0.55 : 0.4}
-        far={2}
-        color="#000000"
-        position={[0, 0.001, 0]}
-      />
+        <gridHelper
+          args={[FLOOR_SIZE, FLOOR_SIZE * 2, isDark ? '#334155' : '#cbd5e1', isDark ? '#1e293b' : '#e2e8f0']}
+          position={[0, 0.0005, 0]}
+        />
+        {!performanceMode && (
+          <ContactShadows
+            resolution={1024}
+            scale={20}
+            blur={2}
+            opacity={isDark ? 0.55 : 0.4}
+            far={2}
+            color="#000000"
+            position={[0, 0.001, 0]}
+          />
+        )}
 
-      <Suspense fallback={null}>
-        <Environment preset="city" environmentIntensity={isDark ? 0.45 : 0.85} />
-        <Physics gravity={GRAVITY} paused={isPhysicsPaused}>
-          <Floor theme={theme} />
-          <WorkspaceParts />
-          <JointSystem />
-        </Physics>
-      </Suspense>
+        <Suspense fallback={null}>
+          <Environment preset="city" environmentIntensity={isDark ? 0.45 : 0.85} />
+          <Physics gravity={GRAVITY} paused={isPhysicsPaused}>
+            <Floor theme={theme} />
+            <WorkspaceParts />
+            <JointSystem key={resetNonce} />
+          </Physics>
+        </Suspense>
 
-      <WiringSystem />
-      <OrbitControls makeDefault target={[0, 0, 0]} enableDamping />
-    </Canvas>
+        <WiringSystem />
+        <OrbitControls makeDefault target={[0, 0, 0]} enableDamping />
+      </Canvas>
+
+      {performanceMode && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="pointer-events-none absolute bottom-4 left-4 z-10 rounded-full border border-amber-400/40 bg-slate-950/80 px-3 py-1 text-[11px] font-medium tracking-wide text-amber-200 shadow-md backdrop-blur-sm"
+        >
+          Performance Mode Active
+        </div>
+      )}
+    </div>
   );
 }
