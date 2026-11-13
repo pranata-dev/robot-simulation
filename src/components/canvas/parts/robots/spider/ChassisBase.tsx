@@ -1,17 +1,19 @@
 'use client';
 
 import { memo, useEffect, useRef } from 'react';
-import { type RapierRigidBody, interactionGroups } from '@react-three/rapier';
-import AnchorMarker, { type SocketFeedbackState } from '@/components/canvas/parts/AnchorMarker';
-import AssemblyStand from '@/components/canvas/parts/AssemblyStand';
-import DraggableRigidPart from '@/components/canvas/parts/DraggableRigidPart';
+import type { RapierRigidBody } from '@react-three/rapier';
+import AnchorMarker, { type SocketFeedbackState } from '@/components/canvas/parts/shared/AnchorMarker';
+import AssemblyStand from '@/components/canvas/parts/shared/AssemblyStand';
+import DraggableRigidPart from '@/components/canvas/parts/shared/DraggableRigidPart';
 import {
-  CHASSIS_COLLIDER_HALF_EXTENTS,
-  CHASSIS_DIMENSIONS,
-  CHASSIS_HALF_HEIGHT,
-  CHASSIS_SOCKETS,
   PART_CATALOG,
+  getActiveBlueprint,
 } from '@/lib/constants/socketRegistry';
+import {
+  CHASSIS_ANGULAR_DAMPING,
+  CHASSIS_LINEAR_DAMPING,
+  ROBOT_COLLISION_GROUPS,
+} from '@/lib/physics/servoMotorControl';
 import { useSimulationStore } from '@/store/useSimulationStore';
 import type { Vector3Tuple } from '@/types/simulator';
 
@@ -24,10 +26,13 @@ interface ChassisBaseProps {
 const CHASSIS_USER_DATA = { type: 'chassis' };
 const CHASSIS_MASS = PART_CATALOG.CHASSIS_BASE.mass;
 const STAND_VISIBILITY_EPSILON = 0.005;
+const DISABLE_RAYCAST = () => null;
 
 function ChassisBase({ id, position, rotation }: ChassisBaseProps) {
   const rigidBodyRef = useRef<RapierRigidBody | null>(null);
   const simulationStatus = useSimulationStore((state) => state.simulationStatus);
+  const activeBlueprintId = useSimulationStore((state) => state.activeBlueprintId);
+  const isWiringXray = useSimulationStore((state) => state.viewMode === 'wiring_xray');
   const registerRigidBody = useSimulationStore((state) => state.registerRigidBody);
   const unregisterRigidBody = useSimulationStore((state) => state.unregisterRigidBody);
   const activeSnapTarget = useSimulationStore((state) =>
@@ -41,7 +46,17 @@ function ChassisBase({ id, position, rotation }: ChassisBaseProps) {
     };
   }, [id, registerRigidBody, unregisterRigidBody]);
 
-  const standHeight = position[1] - CHASSIS_HALF_HEIGHT;
+  const blueprint = getActiveBlueprint(activeBlueprintId);
+  const chassisDimensions = blueprint.chassisDimensions;
+  const chassisHalfHeight = chassisDimensions[1] / 2;
+  const colliderHalfExtents: Vector3Tuple = [
+    chassisDimensions[0] / 2,
+    chassisHalfHeight,
+    chassisDimensions[2] / 2,
+  ];
+  const chassisSockets = blueprint.sockets.CHASSIS_BASE;
+
+  const standHeight = position[1] - chassisHalfHeight;
   const showAssemblyStand = simulationStatus === 'idle' && standHeight > STAND_VISIBILITY_EPSILON;
 
   return (
@@ -53,27 +68,33 @@ function ChassisBase({ id, position, rotation }: ChassisBaseProps) {
         rotation={rotation}
         colliders={false}
         includeDefaultCollider
-        colliderHalfExtents={CHASSIS_COLLIDER_HALF_EXTENTS}
+        colliderHalfExtents={colliderHalfExtents}
         mass={CHASSIS_MASS}
         friction={0.4}
-        linearDamping={0.35}
-        angularDamping={1.0}
-        rigidBodyTypeOverride="dynamic"
-        collisionGroups={interactionGroups(1, [0])}
+        restitution={0}
+        linearDamping={CHASSIS_LINEAR_DAMPING}
+        angularDamping={CHASSIS_ANGULAR_DAMPING}
+        canSleep={false}
+        collisionGroups={ROBOT_COLLISION_GROUPS}
         rigidBodyRef={rigidBodyRef}
         userData={CHASSIS_USER_DATA}
       >
-        <mesh castShadow receiveShadow>
-          <boxGeometry args={CHASSIS_DIMENSIONS} />
+        <mesh
+          castShadow
+          receiveShadow
+          raycast={isWiringXray ? DISABLE_RAYCAST : undefined}
+        >
+          <boxGeometry args={chassisDimensions} />
           <meshStandardMaterial
             color="#3f3f46"
             metalness={0.3}
             roughness={0.6}
             transparent
-            opacity={0.65}
+            opacity={isWiringXray ? 0.22 : 0.65}
+            depthWrite={!isWiringXray}
           />
         </mesh>
-        {CHASSIS_SOCKETS.map((socket) => {
+        {chassisSockets.map((socket) => {
           let feedbackState: SocketFeedbackState = 'idle';
           if (activeSnapTarget?.socketId === socket.id) {
             feedbackState = activeSnapTarget.isValid ? 'valid' : 'invalid';

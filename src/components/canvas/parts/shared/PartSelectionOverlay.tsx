@@ -17,7 +17,7 @@ const SELECTION_BOUNDS_BY_PART: Readonly<Record<PartType, PartSelectionBounds>> 
   CHASSIS_BASE: { center: [0, 0, 0], size: [1.24, 0.19, 1.64] },
   ESP32_DEVKIT: { center: [0, 0.015, 0], size: [0.32, 0.1, 0.59] },
   BATTERY_2S: { center: [0, 0, 0], size: [0.39, 0.22, 0.74] },
-  SERVO_MG90S: { center: [0, 0.02, 0.02], size: [0.36, 0.36, 0.22] },
+  SERVO_MG90S: { center: [0, 0.02, -0.01], size: [0.36, 0.36, 0.28] },
   LEG_COXA: { center: [0.12, 0, 0], size: [0.34, 0.19, 0.24] },
   LEG_TIBIA: { center: [0, -0.17, 0.25], size: [0.14, 0.48, 0.64] },
   OBSTACLE_BLOCK: { center: [0, 0, 0], size: [0.84, 0.39, 0.54] },

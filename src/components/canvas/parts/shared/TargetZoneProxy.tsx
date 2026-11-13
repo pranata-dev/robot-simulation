@@ -3,7 +3,7 @@
 import { memo, useEffect, useRef } from 'react';
 import { useFrame } from '@react-three/fiber';
 import { CuboidCollider, interactionGroups } from '@react-three/rapier';
-import DraggableRigidPart from '@/components/canvas/parts/DraggableRigidPart';
+import DraggableRigidPart from '@/components/canvas/parts/shared/DraggableRigidPart';
 import { PART_CATALOG } from '@/lib/constants/socketRegistry';
 import { useSimulationStore } from '@/store/useSimulationStore';
 import type { Vector3Tuple } from '@/types/simulator';

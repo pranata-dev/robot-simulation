@@ -2,10 +2,11 @@
 
 import { memo, useEffect, useRef } from 'react';
 import { Text } from '@react-three/drei';
-import { type RapierRigidBody, interactionGroups } from '@react-three/rapier';
-import DraggableRigidPart from '@/components/canvas/parts/DraggableRigidPart';
-import PinNode from '@/components/canvas/parts/PinNode';
+import type { RapierRigidBody } from '@react-three/rapier';
+import DraggableRigidPart from '@/components/canvas/parts/shared/DraggableRigidPart';
+import PinNode from '@/components/canvas/parts/shared/PinNode';
 import { ESP32_PINS, PART_CATALOG } from '@/lib/constants/socketRegistry';
+import { ROBOT_COLLISION_GROUPS } from '@/lib/physics/servoMotorControl';
 import { useSimulationStore } from '@/store/useSimulationStore';
 import type { PinId, Vector3Tuple } from '@/types/simulator';
 
@@ -60,8 +61,8 @@ function ESP32Proxy({ id, position, rotation, attachedTo }: ESP32ProxyProps) {
       enableSnapping
       colliderHalfExtents={COLLIDER_HALF_EXTENTS}
       mass={mass}
-      rigidBodyTypeOverride="dynamic"
-      collisionGroups={interactionGroups(1, [0])}
+      restitution={0}
+      collisionGroups={ROBOT_COLLISION_GROUPS}
       rigidBodyRef={rigidBodyRef}
     >
       {/* Flat rectangular PCB substrate */}

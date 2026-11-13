@@ -5,6 +5,11 @@ import * as THREE from 'three';
 import { useThree } from '@react-three/fiber';
 import { type RapierRigidBody, useRapier } from '@react-three/rapier';
 import { registerPartRigidBody, unregisterPartRigidBody } from '@/lib/physics/rigidBodyRegistry';
+import {
+  eulerToQuaternionTuple,
+  syncRigidBodyToWorldTransform,
+} from '@/lib/physics/jointConstraints';
+import { isValidRigidBody } from '@/lib/physics/servoMotorControl';
 import { useSimulationStore } from '@/store/useSimulationStore';
 import type { PartType, SimulationStatus, Vector3Tuple } from '@/types/simulator';
 import {
@@ -55,10 +60,12 @@ export function usePartDragAndSync({
     pos: Vector3Tuple;
     rot: Vector3Tuple;
     resetNonce: number;
+    simulationStatus: SimulationStatus;
   }>({
     pos: [...position],
     rot: [...rotation],
     resetNonce,
+    simulationStatus,
   });
 
   const isReadOnly = useSimulationStore((state) => state.readOnly);
@@ -83,8 +90,17 @@ export function usePartDragAndSync({
       prev.rot[1] !== rotation[1] ||
       prev.rot[2] !== rotation[2];
     const resetTriggered = prev.resetNonce !== resetNonce && resetNonce > 0;
+    const enteredPlaying = prev.simulationStatus !== 'playing' && simulationStatus === 'playing';
 
-    if ((!transformChanged && !resetTriggered) || !isDragEnabled || isDraggingRef.current) {
+    if (
+      (!transformChanged && !resetTriggered && !enteredPlaying) ||
+      (!isDragEnabled && !enteredPlaying) ||
+      isDraggingRef.current
+    ) {
+      lastSyncedRef.current = {
+        ...prev,
+        simulationStatus,
+      };
       return;
     }
 
@@ -92,28 +108,24 @@ export function usePartDragAndSync({
       pos: [...position],
       rot: [...rotation],
       resetNonce,
+      simulationStatus,
     };
 
-    const body = rigidBodyRef.current;
-    const targetQuat = new THREE.Quaternion().setFromEuler(
-      new THREE.Euler(rotation[0], rotation[1], rotation[2]),
-    );
+    syncRigidBodyToWorldTransform(rigidBodyRef.current, position, rotation);
 
-    if (body) {
-      body.setTranslation({ x: position[0], y: position[1], z: position[2] }, true);
-      body.setRotation({ x: targetQuat.x, y: targetQuat.y, z: targetQuat.z, w: targetQuat.w }, true);
-      body.setLinvel({ x: 0, y: 0, z: 0 }, true);
-      body.setAngvel({ x: 0, y: 0, z: 0 }, true);
-    }
-
+    const [qx, qy, qz, qw] = eulerToQuaternionTuple(rotation);
     const partObject = scene.getObjectByName(id);
     if (partObject) {
       partObject.position.set(position[0], position[1], position[2]);
-      partObject.quaternion.copy(targetQuat);
+      partObject.quaternion.set(qx, qy, qz, qw);
     }
 
-    world.propagateModifiedBodyPositionsToColliders();
-  }, [id, isDragEnabled, position, resetNonce, rigidBodyRef, rotation, scene, world]);
+    try {
+      world.propagateModifiedBodyPositionsToColliders();
+    } catch {
+      // Ignore Rapier world teardown while resetting scene bodies.
+    }
+  }, [id, isDragEnabled, position, resetNonce, rigidBodyRef, rotation, scene, simulationStatus, world]);
 
   useEffect(() => {
     return () => {
@@ -126,9 +138,13 @@ export function usePartDragAndSync({
     isDraggingRef.current = false;
 
     const body = rigidBodyRef.current;
-    if (body) {
-      const t = body.translation();
-      dragOriginRef.current = [t.x, t.y, t.z];
+    if (isValidRigidBody(body)) {
+      try {
+        const t = body.translation();
+        dragOriginRef.current = [t.x, t.y, t.z];
+      } catch {
+        dragOriginRef.current = [...position];
+      }
     } else {
       dragOriginRef.current = [...position];
     }
@@ -183,9 +199,13 @@ export function usePartDragAndSync({
         );
       }
 
-      if (rigidBodyRef.current) {
-        rigidBodyRef.current.setTranslation({ x: nextX, y: nextY, z: nextZ }, false);
-        world.propagateModifiedBodyPositionsToColliders();
+      if (isValidRigidBody(rigidBodyRef.current)) {
+        try {
+          rigidBodyRef.current.setTranslation({ x: nextX, y: nextY, z: nextZ }, false);
+          world.propagateModifiedBodyPositionsToColliders();
+        } catch {
+          // Ignore transient Rapier handle access while dragging during teardown.
+        }
       }
 
       if (enableSnapping) {

@@ -1,8 +1,11 @@
 'use client';
 
+import { useSimulationStore } from '@/store/useSimulationStore';
 import type { Vector3Tuple } from '@/types/simulator';
 
 export type SocketFeedbackState = 'idle' | 'valid' | 'invalid';
+
+const DISABLE_RAYCAST = () => null;
 
 interface AnchorMarkerProps {
   /** Socket or pin id; mirrored onto the Three.js object name for scene-graph lookups. */
@@ -31,6 +34,7 @@ export default function AnchorMarker({
   color,
   feedbackState = 'idle',
 }: AnchorMarkerProps) {
+  const isWiringXray = useSimulationStore((state) => state.viewMode === 'wiring_xray');
   const feedback = FEEDBACK_STYLE[feedbackState];
   const resolvedColor = color ?? feedback.color;
   const resolvedIntensity = color ? 0.4 : feedback.emissiveIntensity;
@@ -38,7 +42,7 @@ export default function AnchorMarker({
 
   return (
     <group name={name} position={position} rotation={rotation}>
-      <mesh scale={resolvedScale}>
+      <mesh scale={resolvedScale} raycast={isWiringXray ? DISABLE_RAYCAST : undefined}>
         <sphereGeometry args={[radius]} />
         <meshStandardMaterial
           color={resolvedColor}

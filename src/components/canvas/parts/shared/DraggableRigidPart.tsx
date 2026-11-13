@@ -15,8 +15,9 @@ import {
   RigidBody,
 } from '@react-three/rapier';
 import type { ActiveCollisionTypes, InteractionGroups } from '@dimforge/rapier3d-compat';
-import PartSelectionOverlay from '@/components/canvas/parts/PartSelectionOverlay';
+import PartSelectionOverlay from '@/components/canvas/parts/shared/PartSelectionOverlay';
 import { usePartDragAndSync } from '@/hooks/usePartDragAndSync';
+import { eulerToQuaternionTuple } from '@/lib/physics/jointConstraints';
 import { useSimulationStore } from '@/store/useSimulationStore';
 import type { PartType, Vector3Tuple } from '@/types/simulator';
 
@@ -32,8 +33,10 @@ interface DraggableRigidPartProps {
   colliderHalfExtents?: Vector3Tuple;
   mass?: number;
   friction?: number;
+  restitution?: number;
   linearDamping?: number;
   angularDamping?: number;
+  canSleep?: boolean;
   rigidBodyTypeOverride?: RigidBodyTypeString;
   activeCollisionTypes?: ActiveCollisionTypes;
   collisionGroups?: InteractionGroups;
@@ -65,8 +68,10 @@ export default function DraggableRigidPart({
   colliderHalfExtents = DEFAULT_HALF_EXTENTS,
   mass = 0.02,
   friction = 0.5,
+  restitution = 0,
   linearDamping = 0,
   angularDamping = 0,
+  canSleep,
   rigidBodyTypeOverride,
   activeCollisionTypes,
   collisionGroups,
@@ -86,7 +91,12 @@ export default function DraggableRigidPart({
   const resetNonce = useSimulationStore((state) => state.resetNonce);
   const isSelected = useSimulationStore((state) => state.selectedPartId === id);
   const selectPart = useSimulationStore((state) => state.selectPart);
-  const rigidBodyType = rigidBodyTypeOverride ?? 'dynamic';
+  const rigidBodyType =
+    rigidBodyTypeOverride ?? (simulationStatus === 'playing' ? 'dynamic' : 'fixed');
+  const resolvedQuaternion = useMemo(
+    () => eulerToQuaternionTuple(rotation),
+    [rotation],
+  );
   const resolvedUserData = useMemo(
     () => ({
       partType,
@@ -124,13 +134,16 @@ export default function DraggableRigidPart({
       name={id}
       type={rigidBodyType}
       colliders={colliders}
+      canSleep={canSleep ?? (rigidBodyType === 'dynamic' ? false : true)}
+      restitution={restitution}
       friction={colliders ? friction : undefined}
       position={position}
-      rotation={rotation}
+      quaternion={resolvedQuaternion}
       linearDamping={linearDamping}
       angularDamping={angularDamping}
       activeCollisionTypes={activeCollisionTypes}
       collisionGroups={collisionGroups}
+      solverGroups={collisionGroups}
       userData={resolvedUserData}
       sensor={sensor}
       onIntersectionEnter={onIntersectionEnter}
@@ -142,6 +155,9 @@ export default function DraggableRigidPart({
           args={colliderHalfExtents}
           mass={mass}
           friction={friction}
+          restitution={restitution}
+          collisionGroups={collisionGroups}
+          solverGroups={collisionGroups}
           sensor={sensor}
         />
       )}

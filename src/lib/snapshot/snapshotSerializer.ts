@@ -1,6 +1,6 @@
 import {
+  ALL_ROBOT_BLUEPRINTS,
   PART_CATALOG,
-  SOCKETS_BY_PART,
   findPinDefinition,
 } from '@/lib/constants/socketRegistry';
 import {
@@ -12,6 +12,7 @@ import {
   type ThemeMode,
   type Vector3Tuple,
   type WireConnection,
+  type WiringMode,
   type WorkspacePart,
 } from '@/types/simulator';
 
@@ -29,9 +30,9 @@ const IMPLEMENTED_PART_TYPES = new Set<PartType>([
 ]);
 
 const SOCKET_DEFINITIONS_BY_ID = new Map<SocketId, SocketDefinition>(
-  Object.values(SOCKETS_BY_PART)
-    .flat()
-    .map((socketDef) => [socketDef.id, socketDef]),
+  ALL_ROBOT_BLUEPRINTS.flatMap((blueprint) =>
+    Object.values(blueprint.sockets).flat(),
+  ).map((socketDef) => [socketDef.id, socketDef]),
 );
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -71,6 +72,10 @@ function isThemeMode(value: unknown): value is ThemeMode {
   return value === 'light' || value === 'dark';
 }
 
+function isWiringMode(value: unknown): value is WiringMode {
+  return value === '3-pin' || value === '1-wire';
+}
+
 function hasParentCycle(
   partId: string,
   partsById: ReadonlyMap<string, WorkspacePart>,
@@ -93,6 +98,7 @@ export function serializeSimulationSnapshot(snapshot: {
   wires: readonly WireConnection[];
   script: string;
   theme?: ThemeMode;
+  wiringMode?: WiringMode;
 }): string {
   const payload: SimulationSnapshot = {
     schemaVersion: snapshot.schemaVersion,
@@ -115,6 +121,7 @@ export function serializeSimulationSnapshot(snapshot: {
     })),
     script: snapshot.script,
     ...(snapshot.theme ? { theme: snapshot.theme } : {}),
+    ...(snapshot.wiringMode ? { wiringMode: snapshot.wiringMode } : {}),
   };
 
   return JSON.stringify(payload, null, 2);
@@ -154,6 +161,10 @@ export function parseAndValidateSimulationSnapshot(jsonString: string): ParsedSn
 
   if (raw.theme !== undefined && !isThemeMode(raw.theme)) {
     return { success: false, error: 'Snapshot "theme" must be "light" or "dark".' };
+  }
+
+  if (raw.wiringMode !== undefined && !isWiringMode(raw.wiringMode)) {
+    return { success: false, error: 'Snapshot "wiringMode" must be "3-pin" or "1-wire".' };
   }
 
   const parsedParts: WorkspacePart[] = [];
@@ -305,6 +316,7 @@ export function parseAndValidateSimulationSnapshot(jsonString: string): ParsedSn
       wires: parsedWires,
       script: raw.script,
       ...(raw.theme !== undefined ? { theme: raw.theme } : {}),
+      ...(raw.wiringMode !== undefined ? { wiringMode: raw.wiringMode } : {}),
     },
   };
 }

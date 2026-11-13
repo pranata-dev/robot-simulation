@@ -1,9 +1,9 @@
 'use client';
 
 import { memo, useEffect, useRef } from 'react';
-import { interactionGroups } from '@react-three/rapier';
-import DraggableRigidPart from '@/components/canvas/parts/DraggableRigidPart';
+import DraggableRigidPart from '@/components/canvas/parts/shared/DraggableRigidPart';
 import { PART_CATALOG } from '@/lib/constants/socketRegistry';
+import { ENV_COLLISION_GROUPS } from '@/lib/physics/servoMotorControl';
 import { useSimulationStore } from '@/store/useSimulationStore';
 import type { PartType, Vector3Tuple } from '@/types/simulator';
 
@@ -16,7 +16,7 @@ interface ObstacleProxyProps {
 const { dimensions } = PART_CATALOG.OBSTACLE_BLOCK;
 const [WIDTH, HEIGHT, DEPTH] = dimensions;
 const COLLIDER_HALF_EXTENTS: Vector3Tuple = [WIDTH / 2, HEIGHT / 2, DEPTH / 2];
-const OBSTACLE_COLLISION_GROUPS = interactionGroups(0, [0, 1]);
+const OBSTACLE_COLLISION_GROUPS = ENV_COLLISION_GROUPS;
 const HIT_COOLDOWN_MS = 450;
 const ROBOT_COLLIDER_TYPES = new Set<PartType>([
   'CHASSIS_BASE',
@@ -47,6 +47,7 @@ function ObstacleProxy({ id, position, rotation }: ObstacleProxyProps) {
       colliderHalfExtents={COLLIDER_HALF_EXTENTS}
       mass={0}
       friction={0.9}
+      restitution={0}
       collisionGroups={OBSTACLE_COLLISION_GROUPS}
       onCollisionEnter={(e) => {
         if (useSimulationStore.getState().simulationStatus !== 'playing') return;

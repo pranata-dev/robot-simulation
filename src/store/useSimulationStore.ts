@@ -5,12 +5,15 @@ import type { RapierRigidBody } from '@react-three/rapier';
 import { v4 as uuidv4 } from 'uuid';
 import { create } from 'zustand';
 import {
-  CHASSIS_ASSEMBLY_WORKING_Y,
-  CHASSIS_HALF_HEIGHT,
   ESP32_PINS,
   PART_CATALOG,
-  SPIDER_BILL_OF_MATERIALS,
+  findActivePresetById,
   findPinDefinition,
+  getActiveChassisAssemblyWorkingY,
+  getActiveChassisHalfHeight,
+  getActiveDefaultInventoryCounts,
+  getWireColorForPinRole,
+  registerActiveBlueprintIdReader,
 } from '@/lib/constants/socketRegistry';
 import { validateWiringTopology } from '@/lib/microcontroller/circuitValidator';
 import {
@@ -20,10 +23,12 @@ import {
   unregisterPartRigidBody,
   unregisterServoHornRef,
 } from '@/lib/physics/rigidBodyRegistry';
+import { clampServoAngleDeg } from '@/lib/physics/servoMotorControl';
 import {
   parseAndValidateSimulationSnapshot,
   serializeSimulationSnapshot,
 } from '@/lib/snapshot/snapshotSerializer';
+import { createInlineRobotScriptWorker } from '@/lib/worker/createRobotScriptWorker';
 import {
   type ActiveSnapTarget,
   type ChallengeStatus,
@@ -31,16 +36,20 @@ import {
   type InventoryItem,
   type PartType,
   type PinId,
+  type RobotBlueprintId,
   SIMULATION_SCHEMA_VERSION,
   type ScriptConsoleEntry,
   type SimulationEmbedConfig,
   type SimulationSchemaVersion,
+  type SimulationSnapshot,
   type SimulationStatus,
   type SnapshotImportResult,
   type SocketId,
   type ThemeMode,
   type Vector3Tuple,
+  type ViewMode,
   type WireConnection,
+  type WiringMode,
   type WiringValidationResult,
   type WorkerInboundMessage,
   type WorkerLogLevel,
@@ -51,6 +60,7 @@ import { resolveHierarchyWorldTransforms } from '@/utils/snapLogic';
 
 export interface SimulationData {
   schemaVersion: SimulationSchemaVersion;
+  activeBlueprintId: RobotBlueprintId;
   inventory: InventoryItem[];
   workspaceParts: WorkspacePart[];
   wires: WireConnection[];
@@ -58,6 +68,9 @@ export interface SimulationData {
   simulationStatus: SimulationStatus;
   selectedPartId: string | null;
   activeSnapTarget: ActiveSnapTarget | null;
+  viewMode: ViewMode;
+  physicsInspectorOpen: boolean;
+  wiringMode: WiringMode;
   wiringValidation: WiringValidationResult;
   showCircuitDiagnostics: boolean;
   allowedParts: PartType[] | null;
@@ -71,11 +84,17 @@ export interface SimulationData {
   script: string;
   scriptLogs: ScriptConsoleEntry[];
   scriptError: string | null;
+  servoTargetAngles: Record<string, number>;
   servoAngles: Record<string, number>;
   rigidBodyRefs: Record<string, RefObject<RapierRigidBody | null>>;
+  runId: number;
   resetNonce: number;
   isLevelComplete: boolean;
   theme: ThemeMode;
+  historyPast: SimulationSnapshot[];
+  historyFuture: SimulationSnapshot[];
+  canUndo: boolean;
+  canRedo: boolean;
 }
 
 export interface SimulationActions {
@@ -100,6 +119,20 @@ export interface SimulationActions {
   completeWiring: (toPartId: string, toPinId: PinId) => string | null;
   cancelWiring: () => void;
   removeWire: (wireId: string) => void;
+  setWiringMode: (mode: WiringMode) => void;
+  setViewMode: (mode: ViewMode) => void;
+  toggleViewMode: () => void;
+  setPhysicsInspectorOpen: (open: boolean) => void;
+  togglePhysicsInspector: () => void;
+  setPinAngle: (pinAlias: string, angleDeg: number) => void;
+  setServoAngleByPartId: (partId: string, angleDeg: number) => void;
+  setServoAngle: (servoId: string, angleDeg: number) => void;
+  centerAllServos: () => void;
+  startManualServoTest: () => void;
+  loadPreset: (presetId: string) => boolean;
+  setActiveBlueprint: (blueprintId: RobotBlueprintId) => void;
+  undo: () => void;
+  redo: () => void;
   dismissCircuitDiagnostics: () => void;
   setScript: (script: string) => void;
   clearScriptLogs: () => void;
@@ -128,24 +161,24 @@ const DEFAULT_ROTATION: Vector3Tuple = [0, 0, 0];
 const DEFAULT_WIRE_COLOR = '#eab308';
 const DEFAULT_SCRIPT = [
   '# Servo control script (PIN DSL or JS: setServoAngle, delay, loop, log)',
-  'PIN_1: 90',
+  'PIN_1: 45',
   'PIN_2: -45',
-  'DELAY: 800',
-  'PIN_1: 0',
-  'PIN_2: 0',
-  'DELAY: 800',
+  'DELAY: 600',
+  'PIN_1: -45',
+  'PIN_2: 45',
+  'DELAY: 600',
   'LOOP',
 ].join('\n');
 
 const ESP32_PWM_PINS = ESP32_PINS.filter((pin) => pin.role === 'PWM');
-const MIN_SERVO_ANGLE_DEG = -180;
-const MAX_SERVO_ANGLE_DEG = 180;
 const WORKER_WATCHDOG_TIMEOUT_MS = 1500;
 const WORKER_WATCHDOG_POLL_MS = 250;
 const MAX_SCRIPT_LOG_ENTRIES = 100;
+const MAX_HISTORY_ENTRIES = 30;
 
 let activeExecutionRunId = 0;
 let activeScriptWorker: Worker | null = null;
+let activeWorkerBlobUrl: string | null = null;
 let activeWatchdogTimerId: ReturnType<typeof setInterval> | null = null;
 
 function terminateActiveScriptWorker(): void {
@@ -161,6 +194,10 @@ function terminateActiveScriptWorker(): void {
     }
     activeScriptWorker.terminate();
     activeScriptWorker = null;
+  }
+  if (activeWorkerBlobUrl !== null) {
+    URL.revokeObjectURL(activeWorkerBlobUrl);
+    activeWorkerBlobUrl = null;
   }
 }
 
@@ -185,7 +222,7 @@ const ACTIVE_INVENTORY_TYPES: readonly PartType[] = [
 
 function getDefaultSpawnPosition(type: PartType): Vector3Tuple {
   if (type === 'CHASSIS_BASE') {
-    return [0, CHASSIS_HALF_HEIGHT, 0];
+    return [0, getActiveChassisHalfHeight(), 0];
   }
   if (type === 'OBSTACLE_BLOCK') {
     return [0, PART_CATALOG.OBSTACLE_BLOCK.dimensions[1] / 2, 1.5];
@@ -224,15 +261,18 @@ const EMPTY_WIRING_VALIDATION: WiringValidationResult = {
   hasShortCircuit: false,
   issues: [],
   faultyPinKeys: {},
+  activeServoIds: [],
+  pinToServoIds: {},
 };
 
 function evaluateWiringState(
   workspaceParts: readonly WorkspacePart[],
   wires: readonly WireConnection[],
   prevShowDiagnostics: boolean,
+  wiringMode: WiringMode,
   forceShowOnFailure: boolean = false,
 ): { wiringValidation: WiringValidationResult; showCircuitDiagnostics: boolean } {
-  const wiringValidation = validateWiringTopology(workspaceParts, wires);
+  const wiringValidation = validateWiringTopology(workspaceParts, wires, wiringMode);
   if (wiringValidation.isValid) {
     return { wiringValidation, showCircuitDiagnostics: false };
   }
@@ -259,12 +299,12 @@ function zeroRigidBodyVelocities(
 }
 
 function reconcileChassisElevations(workspaceParts: WorkspacePart[]): WorkspacePart[] {
+  const workingY = getActiveChassisAssemblyWorkingY();
+  const halfHeight = getActiveChassisHalfHeight();
   let nextParts = workspaceParts;
   for (const part of nextParts) {
     if (part.type !== 'CHASSIS_BASE') continue;
-    const targetY = hasAttachedLegDescendant(part.id, nextParts)
-      ? CHASSIS_ASSEMBLY_WORKING_Y
-      : CHASSIS_HALF_HEIGHT;
+    const targetY = hasAttachedLegDescendant(part.id, nextParts) ? workingY : halfHeight;
     const dy = targetY - part.position[1];
     if (Math.abs(dy) <= 1e-6) continue;
 
@@ -283,11 +323,12 @@ function isSandboxCoursePart(type: PartType): boolean {
   return type === 'OBSTACLE_BLOCK' || type === 'TARGET_ZONE';
 }
 
-function createInitialInventory(): InventoryItem[] {
+function createInitialInventory(blueprintId: RobotBlueprintId = 'spider'): InventoryItem[] {
+  const counts = getActiveDefaultInventoryCounts(blueprintId);
   return ACTIVE_INVENTORY_TYPES.map((type) => ({
     type,
     label: PART_CATALOG[type].label,
-    quantity: SPIDER_BILL_OF_MATERIALS[type],
+    quantity: counts[type] ?? 0,
   }));
 }
 
@@ -301,16 +342,120 @@ function createPart(type: PartType, position: Vector3Tuple, rotation: Vector3Tup
   };
 }
 
-function createInitialData(): SimulationData {
+function captureHistorySnapshot(
+  state: Pick<SimulationData, 'workspaceParts' | 'wires' | 'script' | 'theme' | 'wiringMode'>,
+): SimulationSnapshot {
   return {
     schemaVersion: SIMULATION_SCHEMA_VERSION,
-    inventory: createInitialInventory(),
+    workspaceParts: state.workspaceParts.map((part) => ({
+      ...part,
+      position: [...part.position] as Vector3Tuple,
+      rotation: [...part.rotation] as Vector3Tuple,
+    })),
+    wires: state.wires.map((wire) => ({ ...wire })),
+    script: state.script,
+    theme: state.theme,
+    wiringMode: state.wiringMode,
+  };
+}
+
+function pushHistoryEntry(
+  historyPast: SimulationSnapshot[],
+  state: Pick<SimulationData, 'workspaceParts' | 'wires' | 'script' | 'theme' | 'wiringMode'>,
+): Pick<SimulationData, 'historyPast' | 'historyFuture' | 'canUndo' | 'canRedo'> {
+  const nextPast = [...historyPast.slice(-(MAX_HISTORY_ENTRIES - 1)), captureHistorySnapshot(state)];
+  return {
+    historyPast: nextPast,
+    historyFuture: [],
+    canUndo: nextPast.length > 0,
+    canRedo: false,
+  };
+}
+
+function buildRestoredHistorySlice(
+  state: SimulationData,
+  targetSnapshot: SimulationSnapshot,
+  nextPast: SimulationSnapshot[],
+  nextFuture: SimulationSnapshot[],
+): Partial<SimulationData> {
+  zeroRigidBodyVelocities(state.rigidBodyRefs);
+
+  const restoredParts = targetSnapshot.workspaceParts.map((part) => ({
+    ...part,
+    position: [...part.position] as Vector3Tuple,
+    rotation: [...part.rotation] as Vector3Tuple,
+  }));
+  const restoredWires = targetSnapshot.wires.map((wire) => ({ ...wire }));
+
+  const nextPartIds = new Set(restoredParts.map((part) => part.id));
+  const nextRigidBodyRefs = { ...state.rigidBodyRefs };
+  const nextServoTargetAngles = { ...state.servoTargetAngles };
+  const nextServoAngles = { ...state.servoAngles };
+  for (const existing of state.workspaceParts) {
+    if (!nextPartIds.has(existing.id)) {
+      unregisterPartRigidBody(existing.id);
+      unregisterServoHornRef(existing.id);
+      setPartDragging(existing.id, false);
+      delete nextRigidBodyRefs[existing.id];
+      delete nextServoTargetAngles[existing.id];
+      delete nextServoAngles[existing.id];
+    }
+  }
+
+  const countsByType = new Map<PartType, number>();
+  for (const part of restoredParts) {
+    countsByType.set(part.type, (countsByType.get(part.type) ?? 0) + 1);
+  }
+  const nextInventory = createInitialInventory(state.activeBlueprintId).map((item) => ({
+    ...item,
+    quantity: Math.max(0, item.quantity - (countsByType.get(item.type) ?? 0)),
+  }));
+
+  const rootIds = new Set(restoredParts.filter((part) => !part.attachedTo).map((part) => part.id));
+  const resolvedParts = reconcileChassisElevations(
+    resolveHierarchyWorldTransforms(restoredParts, rootIds),
+  );
+  const wiringState = evaluateWiringState(
+    resolvedParts,
+    restoredWires,
+    state.showCircuitDiagnostics,
+    state.wiringMode,
+  );
+
+  return {
+    workspaceParts: resolvedParts,
+    wires: restoredWires,
+    inventory: nextInventory,
+    ...wiringState,
+    rigidBodyRefs: {},
+    servoTargetAngles: nextServoTargetAngles,
+    servoAngles: nextServoAngles,
+    activeDraftWire: null,
+    activeSnapTarget: null,
+    selectedPartId:
+      state.selectedPartId && nextPartIds.has(state.selectedPartId) ? state.selectedPartId : null,
+    resetNonce: state.resetNonce + 1,
+    historyPast: nextPast,
+    historyFuture: nextFuture,
+    canUndo: nextPast.length > 0,
+    canRedo: nextFuture.length > 0,
+  };
+}
+
+function createInitialData(blueprintId: RobotBlueprintId = 'spider'): SimulationData {
+  return {
+    schemaVersion: SIMULATION_SCHEMA_VERSION,
+    activeBlueprintId: blueprintId,
+    inventory: createInitialInventory(blueprintId),
     workspaceParts: [],
     wires: [],
     activeDraftWire: null,
     simulationStatus: 'idle',
     selectedPartId: null,
     activeSnapTarget: null,
+    viewMode: 'normal',
+    physicsInspectorOpen: false,
+    wiringMode: '3-pin',
     wiringValidation: EMPTY_WIRING_VALIDATION,
     showCircuitDiagnostics: false,
     allowedParts: null,
@@ -324,28 +469,55 @@ function createInitialData(): SimulationData {
     script: DEFAULT_SCRIPT,
     scriptLogs: [],
     scriptError: null,
+    servoTargetAngles: {},
     servoAngles: {},
     rigidBodyRefs: {},
+    runId: 0,
     resetNonce: 0,
     isLevelComplete: false,
     theme: 'dark',
+    historyPast: [],
+    historyFuture: [],
+    canUndo: false,
+    canRedo: false,
   };
 }
 
+/**
+ * Normalizes `PIN_1`..`PIN_8` and `P1`..`P8` into canonical `P1`..`P8`.
+ */
+export function normalizeCanonicalPinAlias(rawToken: string): string | null {
+  const normalized = rawToken.trim().toUpperCase();
+  const pinMatch = /^(?:PIN_?|P)(\d+)$/.exec(normalized);
+  if (pinMatch) {
+    const index = Number.parseInt(pinMatch[1], 10);
+    if (index >= 1 && index <= ESP32_PWM_PINS.length) {
+      return `P${index}`;
+    }
+    const pwmIdx = ESP32_PWM_PINS.findIndex((pin) => pin.gpio === index);
+    if (pwmIdx !== -1) {
+      return `P${pwmIdx + 1}`;
+    }
+  }
+  const exactPwmIdx = ESP32_PWM_PINS.findIndex((pin) => pin.id === normalized);
+  if (exactPwmIdx !== -1) {
+    return `P${exactPwmIdx + 1}`;
+  }
+  return null;
+}
+
 function resolveEsp32PinId(rawToken: string): PinId | null {
+  const canonicalAlias = normalizeCanonicalPinAlias(rawToken);
+  if (canonicalAlias) {
+    const index = Number.parseInt(canonicalAlias.slice(1), 10);
+    if (index >= 1 && index <= ESP32_PWM_PINS.length) {
+      return ESP32_PWM_PINS[index - 1].id;
+    }
+  }
+
   const normalized = rawToken.trim().toUpperCase();
   const exactPin = ESP32_PINS.find((pin) => pin.id === normalized);
   if (exactPin) return exactPin.id;
-
-  const pinMatch = /^PIN_?(\d+)$/.exec(normalized);
-  if (pinMatch) {
-    const indexOrGpio = Number.parseInt(pinMatch[1], 10);
-    if (indexOrGpio >= 1 && indexOrGpio <= ESP32_PWM_PINS.length) {
-      return ESP32_PWM_PINS[indexOrGpio - 1].id;
-    }
-    const gpioPin = ESP32_PWM_PINS.find((pin) => pin.gpio === indexOrGpio);
-    return gpioPin ? gpioPin.id : null;
-  }
 
   return null;
 }
@@ -354,21 +526,31 @@ function resolveTargetServoIds(
   servoTarget: string,
   workspaceParts: readonly WorkspacePart[],
   wires: readonly WireConnection[],
+  wiringValidation: WiringValidationResult,
 ): string[] {
+  const activeSet = new Set(wiringValidation.activeServoIds);
   const pinId = resolveEsp32PinId(servoTarget);
   if (pinId) {
-    return getWiredServoIdsForPin(pinId, workspaceParts, wires);
+    const wiredServoIds = getWiredServoIdsForPin(pinId, workspaceParts, wires);
+    const mappedServoIds = wiringValidation.pinToServoIds[pinId] ?? [];
+    const combined = Array.from(new Set([...mappedServoIds, ...wiredServoIds]));
+    if (activeSet.size > 0) {
+      const activeFiltered = combined.filter((servoId) => activeSet.has(servoId));
+      if (activeFiltered.length > 0) {
+        return activeFiltered;
+      }
+    }
+    return combined;
   }
 
   const normalized = servoTarget.trim();
-  const directMatches = workspaceParts
+  return workspaceParts
     .filter(
       (part) =>
         part.type === 'SERVO_MG90S' &&
         (part.id === normalized || part.socketId === normalized),
     )
     .map((part) => part.id);
-  return directMatches;
 }
 
 function getWiredServoIdsForPin(
@@ -417,7 +599,10 @@ function getWiredServoIdsForPin(
         const neighborPartId = neighborKey.slice(0, separatorIdx);
         const neighborPinId = neighborKey.slice(separatorIdx + 1);
         const neighborPart = partsById.get(neighborPartId);
-        if (neighborPart?.type === 'SERVO_MG90S' && neighborPinId === 'SERVO_PWM') {
+        if (
+          neighborPart?.type === 'SERVO_MG90S' &&
+          (neighborPinId === 'SERVO_PWM' || neighborPinId.endsWith('_PWM'))
+        ) {
           servoIds.add(neighborPart.id);
         }
       }
@@ -461,6 +646,7 @@ export const useSimulationStore = create<SimulationState>()((set, get) => ({
     const spawnPosition = position ?? getDefaultSpawnPosition(type);
     const part = createPart(type, spawnPosition, rotation);
     set((state) => ({
+      ...pushHistoryEntry(state.historyPast, state),
       inventory: state.inventory.map((entry) =>
         entry.type === type ? { ...entry, quantity: entry.quantity - 1 } : entry,
       ),
@@ -510,9 +696,11 @@ export const useSimulationStore = create<SimulationState>()((set, get) => ({
 
     set((state) => {
       const nextRigidBodyRefs = { ...state.rigidBodyRefs };
+      const nextServoTargetAngles = { ...state.servoTargetAngles };
       const nextServoAngles = { ...state.servoAngles };
       for (const removedId of idsToRemove) {
         delete nextRigidBodyRefs[removedId];
+        delete nextServoTargetAngles[removedId];
         delete nextServoAngles[removedId];
       }
 
@@ -523,9 +711,11 @@ export const useSimulationStore = create<SimulationState>()((set, get) => ({
         remainingParts,
         nextWires,
         state.showCircuitDiagnostics,
+        state.wiringMode,
       );
 
       return {
+        ...pushHistoryEntry(state.historyPast, state),
         workspaceParts: remainingParts,
         inventory: state.inventory.map((entry) => {
           const returnedCount = removedCountByType.get(entry.type) ?? 0;
@@ -544,6 +734,7 @@ export const useSimulationStore = create<SimulationState>()((set, get) => ({
         selectedPartId:
           selectedPartId && idsToRemove.has(selectedPartId) ? null : state.selectedPartId,
         rigidBodyRefs: nextRigidBodyRefs,
+        servoTargetAngles: nextServoTargetAngles,
         servoAngles: nextServoAngles,
       };
     });
@@ -558,9 +749,14 @@ export const useSimulationStore = create<SimulationState>()((set, get) => ({
       const dx = position[0] - target.position[0];
       const dy = position[1] - target.position[1];
       const dz = position[2] - target.position[2];
+      if (dx === 0 && dy === 0 && dz === 0) return state;
+
       const descendantIds = collectDescendantIds(partId, state.workspaceParts);
+      const historySlice =
+        state.simulationStatus === 'idle' ? pushHistoryEntry(state.historyPast, state) : {};
 
       return {
+        ...historySlice,
         workspaceParts: state.workspaceParts.map((part) => {
           if (part.id === partId) {
             return { ...part, position: [...position] };
@@ -611,9 +807,17 @@ export const useSimulationStore = create<SimulationState>()((set, get) => ({
       );
       const withDescendants = resolveHierarchyWorldTransforms(snappedParts, resolvedRoots);
       const nextParts = reconcileChassisElevations(withDescendants);
+      const historySlice =
+        state.simulationStatus === 'idle' ? pushHistoryEntry(state.historyPast, state) : {};
       return {
+        ...historySlice,
         workspaceParts: nextParts,
-        ...evaluateWiringState(nextParts, state.wires, state.showCircuitDiagnostics),
+        ...evaluateWiringState(
+          nextParts,
+          state.wires,
+          state.showCircuitDiagnostics,
+          state.wiringMode,
+        ),
       };
     });
   },
@@ -633,9 +837,17 @@ export const useSimulationStore = create<SimulationState>()((set, get) => ({
           : part,
       );
       const nextParts = reconcileChassisElevations(detachedParts);
+      const historySlice =
+        state.simulationStatus === 'idle' ? pushHistoryEntry(state.historyPast, state) : {};
       return {
+        ...historySlice,
         workspaceParts: nextParts,
-        ...evaluateWiringState(nextParts, state.wires, state.showCircuitDiagnostics),
+        ...evaluateWiringState(
+          nextParts,
+          state.wires,
+          state.showCircuitDiagnostics,
+          state.wiringMode,
+        ),
       };
     });
   },
@@ -688,21 +900,34 @@ export const useSimulationStore = create<SimulationState>()((set, get) => ({
       return null;
     }
 
+    const wireColor =
+      fromPin.role === 'POWER' || toPin.role === 'POWER'
+        ? getWireColorForPinRole('POWER')
+        : fromPin.role === 'GROUND' || toPin.role === 'GROUND'
+          ? getWireColorForPinRole('GROUND')
+          : getWireColorForPinRole('PWM') || DEFAULT_WIRE_COLOR;
+
     const wire: WireConnection = {
       id: uuidv4(),
       fromPartId: startPartId,
       fromPinId: startPinId,
       toPartId,
       toPinId,
-      color: toPin.color || fromPin.color || DEFAULT_WIRE_COLOR,
+      color: wireColor,
     };
 
     set((state) => {
       const nextWires = [...state.wires, wire];
       return {
+        ...pushHistoryEntry(state.historyPast, state),
         wires: nextWires,
         activeDraftWire: null,
-        ...evaluateWiringState(state.workspaceParts, nextWires, state.showCircuitDiagnostics),
+        ...evaluateWiringState(
+          state.workspaceParts,
+          nextWires,
+          state.showCircuitDiagnostics,
+          state.wiringMode,
+        ),
       };
     });
     return wire.id;
@@ -717,10 +942,292 @@ export const useSimulationStore = create<SimulationState>()((set, get) => ({
     if (get().readOnly || get().simulationStatus !== 'idle') return;
     set((state) => {
       const nextWires = state.wires.filter((w) => w.id !== wireId);
+      if (nextWires.length === state.wires.length) return state;
       return {
+        ...pushHistoryEntry(state.historyPast, state),
         wires: nextWires,
-        ...evaluateWiringState(state.workspaceParts, nextWires, state.showCircuitDiagnostics),
+        ...evaluateWiringState(
+          state.workspaceParts,
+          nextWires,
+          state.showCircuitDiagnostics,
+          state.wiringMode,
+        ),
       };
+    });
+  },
+
+  setWiringMode: (mode) => {
+    const { simulationStatus, readOnly, wiringMode } = get();
+    if (simulationStatus !== 'idle' || readOnly || wiringMode === mode) return;
+    set((state) => ({
+      wiringMode: mode,
+      activeDraftWire: null,
+      ...evaluateWiringState(state.workspaceParts, state.wires, state.showCircuitDiagnostics, mode),
+    }));
+  },
+
+  setViewMode: (mode) => {
+    if (get().viewMode === mode) return;
+    set({ viewMode: mode });
+  },
+
+  toggleViewMode: () => {
+    set((state) => ({
+      viewMode: state.viewMode === 'normal' ? 'wiring_xray' : 'normal',
+    }));
+  },
+
+  setPhysicsInspectorOpen: (open) => {
+    if (get().physicsInspectorOpen === open) return;
+    set({ physicsInspectorOpen: open });
+  },
+
+  togglePhysicsInspector: () => {
+    set((state) => ({ physicsInspectorOpen: !state.physicsInspectorOpen }));
+  },
+
+  setPinAngle: (pinAlias, angleDeg) => {
+    if (get().readOnly) return;
+    const { workspaceParts, wires, wiringValidation } = get();
+    const targetServoIds = resolveTargetServoIds(
+      pinAlias,
+      workspaceParts,
+      wires,
+      wiringValidation,
+    );
+    if (targetServoIds.length === 0) return;
+
+    const clampedAngle = clampServoAngleDeg(angleDeg);
+    set((state) => {
+      const nextServoTargetAngles = { ...state.servoTargetAngles };
+      const nextServoAngles = { ...state.servoAngles };
+      for (const servoPartId of targetServoIds) {
+        nextServoTargetAngles[servoPartId] = clampedAngle;
+        nextServoAngles[servoPartId] = clampedAngle;
+      }
+      return {
+        servoTargetAngles: nextServoTargetAngles,
+        servoAngles: nextServoAngles,
+      };
+    });
+  },
+
+  setServoAngleByPartId: (partId, angleDeg) => {
+    if (get().readOnly) return;
+    const clampedAngle = clampServoAngleDeg(angleDeg);
+    set((state) => ({
+      servoTargetAngles: {
+        ...state.servoTargetAngles,
+        [partId]: clampedAngle,
+      },
+      servoAngles: {
+        ...state.servoAngles,
+        [partId]: clampedAngle,
+      },
+    }));
+  },
+
+  setServoAngle: (servoId, angleDeg) => {
+    if (get().readOnly) return;
+    if (resolveEsp32PinId(servoId) !== null) {
+      get().setPinAngle(servoId, angleDeg);
+      return;
+    }
+    get().setServoAngleByPartId(servoId, angleDeg);
+  },
+
+  centerAllServos: () => {
+    if (get().readOnly) return;
+    set((state) => {
+      const centered: Record<string, number> = {};
+      for (const part of state.workspaceParts) {
+        if (part.type === 'SERVO_MG90S') {
+          centered[part.id] = 0;
+        }
+      }
+      return {
+        servoTargetAngles: centered,
+        servoAngles: { ...centered },
+      };
+    });
+  },
+
+  startManualServoTest: () => {
+    const { workspaceParts, wires, wiringMode } = get();
+    const wiringValidation = validateWiringTopology(workspaceParts, wires, wiringMode);
+    if (!wiringValidation.isValid) {
+      set({
+        wiringValidation,
+        showCircuitDiagnostics: true,
+      });
+      return;
+    }
+
+    activeExecutionRunId += 1;
+    terminateActiveScriptWorker();
+
+    set((state) => ({
+      wiringValidation,
+      showCircuitDiagnostics: false,
+      scriptError: null,
+      viewMode: 'normal',
+      workspaceParts: reconcileChassisElevations(
+        resolveHierarchyWorldTransforms(state.workspaceParts),
+      ),
+      rigidBodyRefs: state.simulationStatus === 'playing' ? state.rigidBodyRefs : {},
+      runId: state.simulationStatus === 'playing' ? state.runId : state.runId + 1,
+      simulationStatus: 'playing',
+      challengeStatus: 'in_progress',
+      simulationStartedAt: state.simulationStartedAt ?? Date.now(),
+      activeDraftWire: null,
+      activeSnapTarget: null,
+    }));
+  },
+
+  loadPreset: (presetId) => {
+    if (get().readOnly) return false;
+    const blueprintId = get().activeBlueprintId;
+    const preset = findActivePresetById(presetId, blueprintId);
+    if (!preset) return false;
+
+    activeExecutionRunId += 1;
+    terminateActiveScriptWorker();
+    zeroRigidBodyVelocities(get().rigidBodyRefs);
+    clearPhysicsRegistry();
+
+    const { snapshot } = preset;
+    const idMap = new Map<string, string>();
+    for (const part of snapshot.workspaceParts) {
+      idMap.set(part.id, uuidv4());
+    }
+
+    const clonedParts: WorkspacePart[] = snapshot.workspaceParts.map((part) => ({
+      ...part,
+      id: idMap.get(part.id) ?? uuidv4(),
+      attachedTo: part.attachedTo ? idMap.get(part.attachedTo) : undefined,
+      position: [...part.position] as Vector3Tuple,
+      rotation: [...part.rotation] as Vector3Tuple,
+    }));
+
+    const clonedWires: WireConnection[] = snapshot.wires.map((wire) => ({
+      ...wire,
+      id: uuidv4(),
+      fromPartId: idMap.get(wire.fromPartId) ?? wire.fromPartId,
+      toPartId: idMap.get(wire.toPartId) ?? wire.toPartId,
+    }));
+
+    const rootIds = new Set(clonedParts.filter((part) => !part.attachedTo).map((part) => part.id));
+    const resolvedParts = reconcileChassisElevations(
+      resolveHierarchyWorldTransforms(clonedParts, rootIds),
+    );
+    const nextWiringMode = snapshot.wiringMode ?? get().wiringMode;
+
+    const countsByType = new Map<PartType, number>();
+    for (const part of resolvedParts) {
+      countsByType.set(part.type, (countsByType.get(part.type) ?? 0) + 1);
+    }
+    const nextInventory = createInitialInventory(blueprintId).map((item) => ({
+      ...item,
+      quantity: Math.max(0, item.quantity - (countsByType.get(item.type) ?? 0)),
+    }));
+
+    const wiringState = evaluateWiringState(resolvedParts, clonedWires, false, nextWiringMode);
+
+    set((state) => {
+      const historySlice =
+        state.simulationStatus === 'idle' ? pushHistoryEntry(state.historyPast, state) : {};
+      return {
+        ...historySlice,
+        schemaVersion: snapshot.schemaVersion,
+        inventory: nextInventory,
+        workspaceParts: resolvedParts,
+        wires: clonedWires,
+        script: snapshot.script,
+        wiringMode: nextWiringMode,
+        ...wiringState,
+        activeDraftWire: null,
+        activeSnapTarget: null,
+        selectedPartId: null,
+        simulationStatus: 'idle',
+        challengeStatus: 'idle',
+        obstacleHits: 0,
+        simulationStartedAt: null,
+        completionTimeMs: null,
+        isLevelComplete: false,
+        servoTargetAngles: {},
+        servoAngles: {},
+        rigidBodyRefs: {},
+        scriptLogs: [],
+        scriptError: null,
+        resetNonce: state.resetNonce + 1,
+      };
+    });
+
+    return true;
+  },
+
+  setActiveBlueprint: (blueprintId) => {
+    if (get().readOnly || get().activeBlueprintId === blueprintId) return;
+    activeExecutionRunId += 1;
+    terminateActiveScriptWorker();
+    zeroRigidBodyVelocities(get().rigidBodyRefs);
+    clearPhysicsRegistry();
+    const {
+      theme,
+      wiringMode,
+      viewMode,
+      physicsInspectorOpen,
+      allowedParts,
+      readOnly,
+      zeroCollisionMode,
+      performanceMode,
+    } = get();
+    set({
+      ...createInitialData(blueprintId),
+      theme,
+      wiringMode,
+      viewMode,
+      physicsInspectorOpen,
+      allowedParts,
+      readOnly,
+      zeroCollisionMode,
+      performanceMode,
+    });
+  },
+
+  undo: () => {
+    const { simulationStatus, readOnly, historyPast } = get();
+    if (simulationStatus !== 'idle' || readOnly || historyPast.length === 0) return;
+
+    set((state) => {
+      if (state.simulationStatus !== 'idle' || state.readOnly || state.historyPast.length === 0) {
+        return state;
+      }
+      const nextPast = state.historyPast.slice(0, -1);
+      const targetSnapshot = state.historyPast[state.historyPast.length - 1];
+      const nextFuture = [
+        ...state.historyFuture.slice(-(MAX_HISTORY_ENTRIES - 1)),
+        captureHistorySnapshot(state),
+      ];
+      return buildRestoredHistorySlice(state, targetSnapshot, nextPast, nextFuture);
+    });
+  },
+
+  redo: () => {
+    const { simulationStatus, readOnly, historyFuture } = get();
+    if (simulationStatus !== 'idle' || readOnly || historyFuture.length === 0) return;
+
+    set((state) => {
+      if (state.simulationStatus !== 'idle' || state.readOnly || state.historyFuture.length === 0) {
+        return state;
+      }
+      const nextFuture = state.historyFuture.slice(0, -1);
+      const targetSnapshot = state.historyFuture[state.historyFuture.length - 1];
+      const nextPast = [
+        ...state.historyPast.slice(-(MAX_HISTORY_ENTRIES - 1)),
+        captureHistorySnapshot(state),
+      ];
+      return buildRestoredHistorySlice(state, targetSnapshot, nextPast, nextFuture);
     });
   },
 
@@ -744,8 +1251,8 @@ export const useSimulationStore = create<SimulationState>()((set, get) => ({
   },
 
   runSimulation: () => {
-    const { workspaceParts, wires, script } = get();
-    const wiringValidation = validateWiringTopology(workspaceParts, wires);
+    const { workspaceParts, wires, script, wiringMode } = get();
+    const wiringValidation = validateWiringTopology(workspaceParts, wires, wiringMode);
     if (!wiringValidation.isValid) {
       set({
         wiringValidation,
@@ -757,12 +1264,19 @@ export const useSimulationStore = create<SimulationState>()((set, get) => ({
     terminateActiveScriptWorker();
     const runId = ++activeExecutionRunId;
 
-    set({
+    set((state) => ({
       wiringValidation,
       showCircuitDiagnostics: false,
       scriptLogs: [],
       scriptError: null,
+      servoTargetAngles: {},
       servoAngles: {},
+      viewMode: 'normal',
+      workspaceParts: reconcileChassisElevations(
+        resolveHierarchyWorldTransforms(state.workspaceParts),
+      ),
+      rigidBodyRefs: {},
+      runId: state.runId + 1,
       simulationStatus: 'playing',
       challengeStatus: 'in_progress',
       obstacleHits: 0,
@@ -771,7 +1285,7 @@ export const useSimulationStore = create<SimulationState>()((set, get) => ({
       isLevelComplete: false,
       activeDraftWire: null,
       activeSnapTarget: null,
-    });
+    }));
 
     if (typeof Worker === 'undefined') {
       set({
@@ -780,10 +1294,6 @@ export const useSimulationStore = create<SimulationState>()((set, get) => ({
       });
       return;
     }
-
-    const worker = new Worker(new URL('../workers/robotScriptWorker.ts', import.meta.url));
-    activeScriptWorker = worker;
-    let lastHeartbeatAt = Date.now();
 
     const failRunWithMessage = (message: string) => {
       terminateActiveScriptWorker();
@@ -798,96 +1308,154 @@ export const useSimulationStore = create<SimulationState>()((set, get) => ({
       }));
     };
 
-    activeWatchdogTimerId = setInterval(() => {
-      if (
-        activeScriptWorker !== worker ||
-        runId !== activeExecutionRunId ||
-        get().simulationStatus !== 'playing'
-      ) {
-        return;
-      }
-      if (Date.now() - lastHeartbeatAt > WORKER_WATCHDOG_TIMEOUT_MS) {
-        failRunWithMessage(
-          `Watchdog terminated unresponsive script after ${WORKER_WATCHDOG_TIMEOUT_MS}ms without yielding (infinite loop detected).`,
-        );
-      }
-    }, WORKER_WATCHDOG_POLL_MS);
+    const launchWorker = (useInlineFallback: boolean): void => {
+      let worker: Worker;
+      let blobUrl: string | null = null;
 
-    worker.onmessage = (event: MessageEvent<WorkerOutboundMessage>) => {
-      const payload = event.data;
-      if (
-        activeScriptWorker !== worker ||
-        runId !== activeExecutionRunId ||
-        payload.runId !== runId
-      ) {
-        return;
-      }
-
-      lastHeartbeatAt = Date.now();
-
-      switch (payload.type) {
-        case 'HEARTBEAT':
+      try {
+        if (useInlineFallback) {
+          const inlineHandle = createInlineRobotScriptWorker();
+          worker = inlineHandle.worker;
+          blobUrl = inlineHandle.blobUrl;
+        } else {
+          worker = new Worker(new URL('../workers/robotScriptWorker.ts', import.meta.url));
+        }
+      } catch (err: unknown) {
+        if (!useInlineFallback) {
+          launchWorker(true);
           return;
-        case 'SET_SERVO_ANGLE': {
-          const { workspaceParts: currentParts, wires: currentWires } = get();
-          const targetServoIds = resolveTargetServoIds(
-            payload.servoTarget,
-            currentParts,
-            currentWires,
+        }
+        const message = err instanceof Error ? err.message : String(err);
+        failRunWithMessage(`Failed to start script worker: ${message}`);
+        return;
+      }
+
+      activeScriptWorker = worker;
+      activeWorkerBlobUrl = blobUrl;
+      let lastHeartbeatAt = Date.now();
+      let hasWorkerResponded = false;
+
+      if (activeWatchdogTimerId !== null) {
+        clearInterval(activeWatchdogTimerId);
+      }
+
+      activeWatchdogTimerId = setInterval(() => {
+        if (
+          activeScriptWorker !== worker ||
+          runId !== activeExecutionRunId ||
+          get().simulationStatus !== 'playing'
+        ) {
+          return;
+        }
+        if (Date.now() - lastHeartbeatAt > WORKER_WATCHDOG_TIMEOUT_MS) {
+          failRunWithMessage(
+            `Watchdog terminated unresponsive script after ${WORKER_WATCHDOG_TIMEOUT_MS}ms without yielding (infinite loop detected).`,
           );
-          if (targetServoIds.length === 0) {
+        }
+      }, WORKER_WATCHDOG_POLL_MS);
+
+      worker.onmessage = (event: MessageEvent<WorkerOutboundMessage>) => {
+        const payload = event.data;
+        if (
+          activeScriptWorker !== worker ||
+          runId !== activeExecutionRunId ||
+          payload.runId !== runId
+        ) {
+          return;
+        }
+
+        hasWorkerResponded = true;
+        lastHeartbeatAt = Date.now();
+
+        switch (payload.type) {
+          case 'HEARTBEAT':
+            return;
+          case 'SET_SERVO_ANGLE': {
+            get().setServoAngle(payload.servoTarget, payload.angleDeg);
             return;
           }
-          const clampedAngle = Math.max(
-            MIN_SERVO_ANGLE_DEG,
-            Math.min(MAX_SERVO_ANGLE_DEG, payload.angleDeg),
-          );
-          set((state) => {
-            const nextServoAngles = { ...state.servoAngles };
-            for (const servoId of targetServoIds) {
-              nextServoAngles[servoId] = clampedAngle;
+          case 'SET_SERVO_BATCH': {
+            const {
+              workspaceParts: currentParts,
+              wires: currentWires,
+              wiringValidation: currentValidation,
+            } = get();
+            const batchedUpdates: Array<{ servoIds: string[]; angleDeg: number }> = [];
+            for (const cmd of payload.commands) {
+              const targetServoIds = resolveTargetServoIds(
+                cmd.servoTarget,
+                currentParts,
+                currentWires,
+                currentValidation,
+              );
+              if (targetServoIds.length > 0) {
+                batchedUpdates.push({
+                  servoIds: targetServoIds,
+                  angleDeg: clampServoAngleDeg(cmd.angleDeg),
+                });
+              }
             }
-            return { servoAngles: nextServoAngles };
-          });
-          for (const bodyRef of Object.values(get().rigidBodyRefs)) {
-            bodyRef.current?.wakeUp();
+            if (batchedUpdates.length === 0) {
+              return;
+            }
+            set((state) => {
+              const nextServoTargetAngles = { ...state.servoTargetAngles };
+              const nextServoAngles = { ...state.servoAngles };
+              for (const update of batchedUpdates) {
+                for (const servoId of update.servoIds) {
+                  nextServoTargetAngles[servoId] = update.angleDeg;
+                  nextServoAngles[servoId] = update.angleDeg;
+                }
+              }
+              return {
+                servoTargetAngles: nextServoTargetAngles,
+                servoAngles: nextServoAngles,
+              };
+            });
+            return;
           }
+          case 'LOG': {
+            const entry = createScriptLogEntry(payload.level, payload.message);
+            set((state) => ({
+              scriptLogs: [...state.scriptLogs.slice(-(MAX_SCRIPT_LOG_ENTRIES - 1)), entry],
+            }));
+            return;
+          }
+          case 'COMPLETED': {
+            terminateActiveScriptWorker();
+            if (runId === activeExecutionRunId) {
+              set({ simulationStatus: 'idle' });
+            }
+            return;
+          }
+          case 'ERROR': {
+            failRunWithMessage(payload.message);
+            return;
+          }
+        }
+      };
+
+      worker.onerror = (event: ErrorEvent) => {
+        if (activeScriptWorker !== worker || runId !== activeExecutionRunId) {
           return;
         }
-        case 'LOG': {
-          const entry = createScriptLogEntry(payload.level, payload.message);
-          set((state) => ({
-            scriptLogs: [...state.scriptLogs.slice(-(MAX_SCRIPT_LOG_ENTRIES - 1)), entry],
-          }));
-          return;
-        }
-        case 'COMPLETED': {
+        if (!useInlineFallback && !hasWorkerResponded) {
           terminateActiveScriptWorker();
-          if (runId === activeExecutionRunId) {
-            set({ simulationStatus: 'idle' });
-          }
+          launchWorker(true);
           return;
         }
-        case 'ERROR': {
-          failRunWithMessage(payload.message);
-          return;
-        }
-      }
+        const message = event.message ? `Script worker error: ${event.message}` : 'Script worker crashed.';
+        failRunWithMessage(message);
+      };
+
+      worker.postMessage({
+        type: 'START',
+        runId,
+        script,
+      } satisfies WorkerInboundMessage);
     };
 
-    worker.onerror = (event: ErrorEvent) => {
-      if (activeScriptWorker !== worker || runId !== activeExecutionRunId) {
-        return;
-      }
-      const message = event.message ? `Script worker error: ${event.message}` : 'Script worker crashed.';
-      failRunWithMessage(message);
-    };
-
-    worker.postMessage({
-      type: 'START',
-      runId,
-      script,
-    } satisfies WorkerInboundMessage);
+    launchWorker(true);
   },
 
   stopSimulation: () => {
@@ -897,7 +1465,9 @@ export const useSimulationStore = create<SimulationState>()((set, get) => ({
     set((state) => ({
       simulationStatus: 'idle',
       challengeStatus: state.challengeStatus === 'in_progress' ? 'idle' : state.challengeStatus,
+      servoTargetAngles: {},
       servoAngles: {},
+      rigidBodyRefs: {},
       activeSnapTarget: null,
       activeDraftWire: null,
       workspaceParts: reconcileChassisElevations(
@@ -911,22 +1481,28 @@ export const useSimulationStore = create<SimulationState>()((set, get) => ({
     const currentStatus = get().simulationStatus;
     if (currentStatus === status) return;
     if (status === 'playing') {
-      const { workspaceParts, wires } = get();
-      const wiringValidation = validateWiringTopology(workspaceParts, wires);
+      const { workspaceParts, wires, wiringMode } = get();
+      const wiringValidation = validateWiringTopology(workspaceParts, wires, wiringMode);
       if (!wiringValidation.isValid) {
         set({ wiringValidation, showCircuitDiagnostics: true });
         return;
       }
-      set({
+      set((state) => ({
         wiringValidation,
         showCircuitDiagnostics: false,
+        viewMode: 'normal',
+        workspaceParts: reconcileChassisElevations(
+          resolveHierarchyWorldTransforms(state.workspaceParts),
+        ),
+        rigidBodyRefs: {},
+        runId: state.runId + 1,
         simulationStatus: 'playing',
         challengeStatus: 'in_progress',
         obstacleHits: 0,
         simulationStartedAt: Date.now(),
         completionTimeMs: null,
         isLevelComplete: false,
-      });
+      }));
       return;
     }
     if (status === 'idle' && currentStatus === 'playing') {
@@ -1012,6 +1588,7 @@ export const useSimulationStore = create<SimulationState>()((set, get) => ({
       wires: state.wires,
       script: state.script,
       theme: state.theme,
+      wiringMode: state.wiringMode,
     });
   },
 
@@ -1026,12 +1603,13 @@ export const useSimulationStore = create<SimulationState>()((set, get) => ({
     clearPhysicsRegistry();
 
     const { snapshot } = parsed;
+    const nextWiringMode = snapshot.wiringMode ?? get().wiringMode;
     const countsByType = new Map<PartType, number>();
     for (const part of snapshot.workspaceParts) {
       countsByType.set(part.type, (countsByType.get(part.type) ?? 0) + 1);
     }
 
-    const nextInventory = createInitialInventory().map((item) => {
+    const nextInventory = createInitialInventory(get().activeBlueprintId).map((item) => {
       const usedCount = countsByType.get(item.type) ?? 0;
       return {
         ...item,
@@ -1045,7 +1623,7 @@ export const useSimulationStore = create<SimulationState>()((set, get) => ({
     const resolvedParts = reconcileChassisElevations(
       resolveHierarchyWorldTransforms(snapshot.workspaceParts, rootIds),
     );
-    const wiringState = evaluateWiringState(resolvedParts, snapshot.wires, false);
+    const wiringState = evaluateWiringState(resolvedParts, snapshot.wires, false, nextWiringMode);
 
     set((state) => ({
       schemaVersion: snapshot.schemaVersion,
@@ -1054,6 +1632,7 @@ export const useSimulationStore = create<SimulationState>()((set, get) => ({
       wires: snapshot.wires,
       script: snapshot.script,
       theme: snapshot.theme ?? state.theme,
+      wiringMode: nextWiringMode,
       ...wiringState,
       activeDraftWire: null,
       activeSnapTarget: null,
@@ -1064,11 +1643,16 @@ export const useSimulationStore = create<SimulationState>()((set, get) => ({
       simulationStartedAt: null,
       completionTimeMs: null,
       isLevelComplete: false,
+      servoTargetAngles: {},
       servoAngles: {},
       rigidBodyRefs: {},
       scriptLogs: [],
       scriptError: null,
       resetNonce: state.resetNonce + 1,
+      historyPast: [],
+      historyFuture: [],
+      canUndo: false,
+      canRedo: false,
     }));
 
     return { success: true };
@@ -1096,7 +1680,7 @@ export const useSimulationStore = create<SimulationState>()((set, get) => ({
           const resetY =
             part.type === 'CHASSIS_BASE' &&
             hasAttachedLegDescendant(part.id, state.workspaceParts)
-              ? CHASSIS_ASSEMBLY_WORKING_Y
+              ? getActiveChassisAssemblyWorkingY()
               : defaultPos[1];
           return {
             ...part,
@@ -1117,7 +1701,9 @@ export const useSimulationStore = create<SimulationState>()((set, get) => ({
       );
 
       return {
-        servoAngles: zeroServoAngles,
+        servoTargetAngles: zeroServoAngles,
+        servoAngles: { ...zeroServoAngles },
+        rigidBodyRefs: {},
         workspaceParts: resolvedParts,
         simulationStatus: 'idle',
         challengeStatus: 'idle',
@@ -1141,10 +1727,23 @@ export const useSimulationStore = create<SimulationState>()((set, get) => ({
       unregisterServoHornRef(part.id);
       setPartDragging(part.id, false);
     }
-    const { theme, allowedParts, readOnly, zeroCollisionMode, performanceMode } = get();
-    set({
-      ...createInitialData(),
+    const {
+      activeBlueprintId,
       theme,
+      wiringMode,
+      viewMode,
+      physicsInspectorOpen,
+      allowedParts,
+      readOnly,
+      zeroCollisionMode,
+      performanceMode,
+    } = get();
+    set({
+      ...createInitialData(activeBlueprintId),
+      theme,
+      wiringMode,
+      viewMode,
+      physicsInspectorOpen,
       allowedParts,
       readOnly,
       zeroCollisionMode,
@@ -1152,3 +1751,5 @@ export const useSimulationStore = create<SimulationState>()((set, get) => ({
     });
   },
 }));
+
+registerActiveBlueprintIdReader(() => useSimulationStore.getState().activeBlueprintId);

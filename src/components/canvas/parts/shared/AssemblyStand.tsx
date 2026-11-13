@@ -4,6 +4,8 @@ import { memo, useRef } from 'react';
 import type * as THREE from 'three';
 import { useFrame } from '@react-three/fiber';
 import { CuboidCollider, type RapierRigidBody, RigidBody, interactionGroups } from '@react-three/rapier';
+import { isValidRigidBody } from '@/lib/physics/servoMotorControl';
+import { useSimulationStore } from '@/store/useSimulationStore';
 import type { Vector3Tuple } from '@/types/simulator';
 
 interface AssemblyStandProps {
@@ -35,6 +37,7 @@ const PILLAR_OFFSETS: readonly [number, number][] = [
 function AssemblyStand({ chassisId, chassisPosition, standHeight }: AssemblyStandProps) {
   const standBodyRef = useRef<RapierRigidBody | null>(null);
   const standVisualRef = useRef<THREE.Group | null>(null);
+  const isWiringXray = useSimulationStore((state) => state.viewMode === 'wiring_xray');
 
   const baseHeight = BASE_PLATE_SIZE[1];
   const cradleHeight = CRADLE_PLATE_SIZE[1];
@@ -50,8 +53,12 @@ function AssemblyStand({ chassisId, chassisPosition, standHeight }: AssemblyStan
     if (standVisualRef.current) {
       standVisualRef.current.position.set(x, 0, z);
     }
-    if (standBodyRef.current) {
-      standBodyRef.current.setTranslation({ x, y: 0, z }, false);
+    if (isValidRigidBody(standBodyRef.current)) {
+      try {
+        standBodyRef.current.setTranslation({ x, y: 0, z }, false);
+      } catch {
+        // Ignore transient Rapier handle access while switching simulation modes.
+      }
     }
   });
 
@@ -68,6 +75,7 @@ function AssemblyStand({ chassisId, chassisPosition, standHeight }: AssemblyStan
         args={[COLLIDER_HALF_EXTENTS[0], standHeight / 2, COLLIDER_HALF_EXTENTS[2]]}
         position={[0, standHeight / 2, 0]}
         friction={0.8}
+        restitution={0}
       />
       <group ref={standVisualRef} name={`${chassisId}_ASSEMBLY_STAND`}>
         {/* Floor-anchored baseplate at y = 0 */}
@@ -78,7 +86,7 @@ function AssemblyStand({ chassisId, chassisPosition, standHeight }: AssemblyStan
             metalness={0.55}
             roughness={0.35}
             transparent
-            opacity={0.55}
+            opacity={isWiringXray ? 0.22 : 0.55}
             depthWrite={false}
           />
         </mesh>
@@ -97,7 +105,7 @@ function AssemblyStand({ chassisId, chassisPosition, standHeight }: AssemblyStan
               metalness={0.65}
               roughness={0.3}
               transparent
-              opacity={0.42}
+              opacity={isWiringXray ? 0.22 : 0.42}
               depthWrite={false}
             />
           </mesh>
@@ -113,7 +121,7 @@ function AssemblyStand({ chassisId, chassisPosition, standHeight }: AssemblyStan
             metalness={0.4}
             roughness={0.4}
             transparent
-            opacity={0.48}
+            opacity={isWiringXray ? 0.22 : 0.48}
             depthWrite={false}
           />
         </mesh>

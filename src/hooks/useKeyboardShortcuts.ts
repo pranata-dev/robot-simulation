@@ -22,19 +22,51 @@ function isEditableElement(element: Element | null): boolean {
 }
 
 /**
- * Registers global Delete/Backspace shortcuts to remove the currently selected modular 3D part
- * while protecting active simulation playback and text/code input fields.
+ * Registers global Delete/Backspace part removal, Ctrl/Cmd+Z / Ctrl/Cmd+Y / Ctrl/Cmd+Shift+Z
+ * undo/redo shortcuts, and the `W` X-Ray Wiring View toggle while protecting input/editor focus.
  */
 export function useKeyboardShortcuts(): void {
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || event.repeat) return;
-      if (event.key !== 'Delete' && event.key !== 'Backspace') return;
+      if (event.defaultPrevented) return;
 
       const targetElement = event.target instanceof Element ? event.target : null;
       if (isEditableElement(document.activeElement) || isEditableElement(targetElement)) {
         return;
       }
+
+      const key = event.key.toLowerCase();
+      const hasPrimaryModifier = (event.ctrlKey || event.metaKey) && !event.altKey;
+
+      if (hasPrimaryModifier && key === 'z') {
+        event.preventDefault();
+        const { simulationStatus, readOnly, undo, redo } = useSimulationStore.getState();
+        if (readOnly || simulationStatus !== 'idle') return;
+        if (event.shiftKey) {
+          redo();
+        } else {
+          undo();
+        }
+        return;
+      }
+
+      if (hasPrimaryModifier && !event.shiftKey && key === 'y') {
+        event.preventDefault();
+        const { simulationStatus, readOnly, redo } = useSimulationStore.getState();
+        if (readOnly || simulationStatus !== 'idle') return;
+        redo();
+        return;
+      }
+
+      if (event.repeat) return;
+
+      if (!event.ctrlKey && !event.metaKey && !event.altKey && key === 'w') {
+        event.preventDefault();
+        useSimulationStore.getState().toggleViewMode();
+        return;
+      }
+
+      if (event.key !== 'Delete' && event.key !== 'Backspace') return;
 
       const { simulationStatus, selectedPartId, readOnly, removePart } =
         useSimulationStore.getState();
