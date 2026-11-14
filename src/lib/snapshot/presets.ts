@@ -179,7 +179,24 @@ function buildFullSpiderWires(): WireConnection[] {
   const groundColor = getWireColorForPinRole('GROUND');
   const pwmColor = getWireColorForPinRole('PWM');
 
-  const wires: WireConnection[] = [];
+  const wires: WireConnection[] = [
+    {
+      id: 'wire-bat-vcc',
+      fromPartId: POWER_LIPO_BATTERY_ID,
+      fromPinId: 'VCC_OUT',
+      toPartId: ESP32_ID,
+      toPinId: 'ESP_VIN',
+      color: powerColor,
+    },
+    {
+      id: 'wire-bat-gnd',
+      fromPartId: POWER_LIPO_BATTERY_ID,
+      fromPinId: 'GND_OUT',
+      toPartId: ESP32_ID,
+      toPinId: 'ESP_GND',
+      color: groundColor,
+    },
+  ];
   for (const spec of QUADRUPED_LEG_SPECS) {
     wires.push(
       {

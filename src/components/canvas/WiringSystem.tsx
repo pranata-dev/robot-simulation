@@ -13,6 +13,11 @@ const MIN_SAG_Y = 0.02;
 const MIN_SAG_OFFSET = 0.04;
 const MAX_SAG_OFFSET = 0.24;
 const POSITION_EPSILON_SQ = 1e-8;
+const POWER_CABLE_RED = '#ef4444';
+const POWER_CABLE_BLACK = '#1c1917';
+const POWER_PIN_TOKENS = new Set(['VCC_OUT', 'VIN', '5V', 'ESP_VIN', 'SERVO_VCC', 'US_VCC']);
+const GROUND_PIN_TOKENS = new Set(['GND_OUT', 'GND', 'ESP_GND', 'SERVO_GND', 'US_GND']);
+const BATTERY_FEED_PINS = new Set(['VCC_OUT', 'GND_OUT']);
 
 const _euler = new THREE.Euler();
 const _localOffset = new THREE.Vector3();
@@ -122,8 +127,19 @@ function DynamicWire({ wire }: { wire: WireConnection }) {
     line.setPoints(frameStartRef.current, frameEndRef.current, frameMidRef.current);
   });
 
+  const isBatteryFeedWire =
+    BATTERY_FEED_PINS.has(wire.fromPinId) || BATTERY_FEED_PINS.has(wire.toPinId);
+
   const wireColor = useMemo(() => {
-    if (isFaultyWire) return '#ef4444';
+    if (isFaultyWire) return POWER_CABLE_RED;
+    const fromIdUpper = wire.fromPinId.toUpperCase();
+    const toIdUpper = wire.toPinId.toUpperCase();
+    if (POWER_PIN_TOKENS.has(fromIdUpper) || POWER_PIN_TOKENS.has(toIdUpper)) {
+      return POWER_CABLE_RED;
+    }
+    if (GROUND_PIN_TOKENS.has(fromIdUpper) || GROUND_PIN_TOKENS.has(toIdUpper)) {
+      return POWER_CABLE_BLACK;
+    }
     const fromPin = fromPart ? findPinDefinition(fromPart.type, wire.fromPinId) : undefined;
     const toPin = toPart ? findPinDefinition(toPart.type, wire.toPinId) : undefined;
     const primaryRole =
@@ -142,7 +158,7 @@ function DynamicWire({ wire }: { wire: WireConnection }) {
       end={curvePoints.end}
       mid={curvePoints.mid}
       color={wireColor}
-      lineWidth={isFaultyWire ? 3.5 : 2.5}
+      lineWidth={isBatteryFeedWire ? 4 : isFaultyWire ? 3.5 : 2.5}
     />
   );
 }
