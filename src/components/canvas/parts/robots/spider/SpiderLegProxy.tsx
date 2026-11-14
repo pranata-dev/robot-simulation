@@ -8,6 +8,7 @@ import {
 } from '@react-three/rapier';
 import AnchorMarker from '@/components/canvas/parts/shared/AnchorMarker';
 import DraggableRigidPart from '@/components/canvas/parts/shared/DraggableRigidPart';
+import { TIBIA_FOOT_RADIUS, TIBIA_FOOT_TIP } from '@/lib/constants/socketRegistry';
 import { ROBOT_COLLISION_GROUPS } from '@/lib/physics/servoMotorControl';
 import { useSimulationStore } from '@/store/useSimulationStore';
 import type { Vector3Tuple } from '@/types/simulator';
@@ -21,10 +22,15 @@ interface SpiderLegProxyProps {
 
 const DEFAULT_ROTATION: Vector3Tuple = [0, 0, 0];
 
-/** Tibia tilts from knee [0, 0.04, 0.34] down to rubber foot tip [0, -0.34, 0.50]. */
+/** Tibia extends from knee [0, 0.04, 0.34] down to foot tip [0, -0.76, 0.52] (0.52u below servo bottom). */
 const KNEE_POS: Vector3Tuple = [0, 0.04, 0.34];
-const FOOT_TIP_POS: Vector3Tuple = [0, -0.34, 0.5];
-const FOOT_RADIUS = 0.045;
+const FOOT_TIP_POS: Vector3Tuple = TIBIA_FOOT_TIP;
+const FOOT_RADIUS = TIBIA_FOOT_RADIUS;
+const TIBIA_MIDPOINT: Vector3Tuple = [
+  0,
+  (KNEE_POS[1] + FOOT_TIP_POS[1]) / 2,
+  (KNEE_POS[2] + FOOT_TIP_POS[2]) / 2,
+];
 const TIBIA_LENGTH = Math.hypot(FOOT_TIP_POS[2] - KNEE_POS[2], KNEE_POS[1] - FOOT_TIP_POS[1]);
 const TIBIA_TILT_X = -Math.atan2(FOOT_TIP_POS[2] - KNEE_POS[2], KNEE_POS[1] - FOOT_TIP_POS[1]);
 const FEMUR_LENGTH = 0.34;
@@ -57,43 +63,37 @@ function SpiderLegProxy({
       rotation={rotation}
       attachedTo={attachedTo}
       enableSnapping
+      colliders={false}
       includeDefaultCollider={false}
       restitution={0}
       linearDamping={0.25}
       angularDamping={0.6}
       collisionGroups={ROBOT_COLLISION_GROUPS}
       rigidBodyRef={rigidBodyRef}
+      customColliders={
+        /* Light upper-femur collider + high-traction foot-tip ball collider; arch under leg stays open */
+        <>
+          <CuboidCollider
+            args={[0.024, 0.024, 0.12]}
+            position={[0, 0.02, 0.18]}
+            mass={0.006}
+            friction={0.2}
+            restitution={0}
+            collisionGroups={ROBOT_COLLISION_GROUPS}
+            solverGroups={ROBOT_COLLISION_GROUPS}
+          />
+          <BallCollider
+            args={[FOOT_RADIUS]}
+            position={FOOT_TIP_POS}
+            mass={0.014}
+            friction={1.5}
+            restitution={0}
+            collisionGroups={ROBOT_COLLISION_GROUPS}
+            solverGroups={ROBOT_COLLISION_GROUPS}
+          />
+        </>
+      }
     >
-      {/* Articulated L-shaped colliders clear of the [0, 0, 0] servo horn pivot */}
-      <CuboidCollider
-        args={[0.028, 0.028, 0.13]}
-        position={[0, 0.02, 0.21]}
-        mass={0.008}
-        friction={0.6}
-        restitution={0}
-        collisionGroups={ROBOT_COLLISION_GROUPS}
-        solverGroups={ROBOT_COLLISION_GROUPS}
-      />
-      <CuboidCollider
-        args={[0.024, TIBIA_LENGTH / 2 - 0.02, 0.024]}
-        position={[0, -0.15, 0.42]}
-        rotation={[TIBIA_TILT_X, 0, 0]}
-        mass={0.01}
-        friction={0.6}
-        restitution={0}
-        collisionGroups={ROBOT_COLLISION_GROUPS}
-        solverGroups={ROBOT_COLLISION_GROUPS}
-      />
-      <BallCollider
-        args={[FOOT_RADIUS]}
-        position={FOOT_TIP_POS}
-        mass={0.012}
-        friction={1.4}
-        restitution={0}
-        collisionGroups={ROBOT_COLLISION_GROUPS}
-        solverGroups={ROBOT_COLLISION_GROUPS}
-      />
-
       {/* Red sphere socket marking top servo-horn attachment joint */}
       <AnchorMarker name="LEG_HIP_MOUNT" position={[0, 0, 0]} color="#ef4444" />
 
@@ -155,7 +155,7 @@ function SpiderLegProxy({
       <mesh
         castShadow
         receiveShadow
-        position={[0, -0.15, 0.42]}
+        position={TIBIA_MIDPOINT}
         rotation={[TIBIA_TILT_X, 0, 0]}
         raycast={isWiringXray ? DISABLE_RAYCAST : undefined}
       >

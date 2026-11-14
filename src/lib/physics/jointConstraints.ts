@@ -1,6 +1,10 @@
 import type { RapierRigidBody } from '@react-three/rapier';
 import * as THREE from 'three';
-import { getSocketsForPart } from '@/lib/constants/socketRegistry';
+import {
+  getSocketsForPart,
+  SPIDER_LEG_HINGE_OFFSET,
+  SPIDER_SERVO_HORN_OFFSET,
+} from '@/lib/constants/socketRegistry';
 import {
   isValidRigidBody,
   resolveSpiderHipRevoluteAxis,
@@ -12,7 +16,6 @@ import type {
   WorkspacePart,
 } from '@/types/simulator';
 
-const ZERO_VEC: Vector3Tuple = [0, 0, 0];
 const IDENTITY_QUAT: QuaternionTuple = [0, 0, 0, 1];
 const DEFAULT_REVOLUTE_AXIS: Vector3Tuple = [0, 1, 0];
 
@@ -36,6 +39,7 @@ export type ResolvedJointConstraint =
       anchorA: Vector3Tuple;
       anchorB: Vector3Tuple;
       axis: Vector3Tuple;
+      initialAngleRad: number;
     };
 
 /**
@@ -48,10 +52,49 @@ export function eulerToQuaternionTuple(rotation: Vector3Tuple): QuaternionTuple 
   return [_quat.x, _quat.y, _quat.z, _quat.w];
 }
 
+function computeTwistAngleAroundAxis(relQuat: THREE.Quaternion, axis: Vector3Tuple): number {
+  const axisVec = new THREE.Vector3(axis[0], axis[1], axis[2]).normalize();
+  const proj = relQuat.x * axisVec.x + relQuat.y * axisVec.y + relQuat.z * axisVec.z;
+  const twist = new THREE.Quaternion(
+    axisVec.x * proj,
+    axisVec.y * proj,
+    axisVec.z * proj,
+    relQuat.w,
+  );
+  if (twist.lengthSq() <= 1e-10) {
+    return 0;
+  }
+  twist.normalize();
+  const sinHalf = twist.x * axisVec.x + twist.y * axisVec.y + twist.z * axisVec.z;
+  const angle = 2 * Math.atan2(sinHalf, twist.w);
+  return Math.atan2(Math.sin(angle), Math.cos(angle));
+}
+
 /**
- * Resolves exact local Rapier joint anchors and frames between an attached child part
- * and its parent socket from socketRegistry/spiderBlueprint so Frame-1 constraints
- * match snapLogic world poses with zero initial solver error.
+ * Measures the current live twist angle (radians) between two Rapier RigidBodies around `axis`.
+ */
+export function measureRevoluteJointAngleRad(
+  parentBody: RapierRigidBody | null | undefined,
+  childBody: RapierRigidBody | null | undefined,
+  axis: Vector3Tuple,
+): number | null {
+  if (!parentBody || !childBody) return null;
+  try {
+    const pRot = parentBody.rotation();
+    const cRot = childBody.rotation();
+    const invParent = new THREE.Quaternion(pRot.x, pRot.y, pRot.z, pRot.w).invert();
+    const childQ = new THREE.Quaternion(cRot.x, cRot.y, cRot.z, cRot.w);
+    const relQuat = invParent.multiply(childQ).normalize();
+    return computeTwistAngleAroundAxis(relQuat, axis);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Resolves exact local Rapier joint anchors and frames from the assembled world
+ * positions and rotations of parent and child parts in the store so Frame-1
+ * constraints hold assembled geometry with zero initial solver impulse.
  */
 export function resolveJointConstraintSpec(
   parent: WorkspacePart,
@@ -67,28 +110,55 @@ export function resolveJointConstraintSpec(
   }
 
   const key = `${child.id}:${parent.id}:${socket.id}`;
+  const parentWorldPos = new THREE.Vector3(...parent.position);
+  const childWorldPos = new THREE.Vector3(...child.position);
+  const parentWorldQuat = new THREE.Quaternion().setFromEuler(
+    new THREE.Euler(parent.rotation[0], parent.rotation[1], parent.rotation[2], 'XYZ'),
+  );
+  const childWorldQuat = new THREE.Quaternion().setFromEuler(
+    new THREE.Euler(child.rotation[0], child.rotation[1], child.rotation[2], 'XYZ'),
+  );
+  const invParentQuat = parentWorldQuat.clone().invert();
 
   if (child.type === 'LEG_TIBIA' && parent.type === 'SERVO_MG90S') {
+    const hornOffset = socket.position ?? SPIDER_SERVO_HORN_OFFSET;
+    const anchorAVec = new THREE.Vector3(hornOffset[0], hornOffset[1], hornOffset[2]);
+    const hornWorldPos = parentWorldPos
+      .clone()
+      .add(anchorAVec.clone().applyQuaternion(parentWorldQuat));
+    const invChildQuat = childWorldQuat.clone().invert();
+    const anchorBVec = hornWorldPos
+      .clone()
+      .sub(childWorldPos)
+      .applyQuaternion(invChildQuat)
+      .add(new THREE.Vector3(...SPIDER_LEG_HINGE_OFFSET));
+    const axis = resolveSpiderHipRevoluteAxis(
+      parent.socketId,
+      socket.jointAxis ?? DEFAULT_REVOLUTE_AXIS,
+    );
+    const relQuat = invParentQuat.clone().multiply(childWorldQuat).normalize();
+
     return {
       kind: 'REVOLUTE',
       key,
       socketId: socket.id,
-      anchorA: [socket.position[0], socket.position[1], socket.position[2]],
-      anchorB: [...ZERO_VEC],
-      axis: resolveSpiderHipRevoluteAxis(
-        parent.socketId,
-        socket.jointAxis ?? DEFAULT_REVOLUTE_AXIS,
-      ),
+      anchorA: [anchorAVec.x, anchorAVec.y, anchorAVec.z],
+      anchorB: [anchorBVec.x, anchorBVec.y, anchorBVec.z],
+      axis,
+      initialAngleRad: computeTwistAngleAroundAxis(relQuat, axis),
     };
   }
+
+  const anchorAVec = childWorldPos.clone().sub(parentWorldPos).applyQuaternion(invParentQuat);
+  const frameAQuat = invParentQuat.clone().multiply(childWorldQuat).normalize();
 
   return {
     kind: 'FIXED',
     key,
     socketId: socket.id,
-    anchorA: [socket.position[0], socket.position[1], socket.position[2]],
-    frameA: eulerToQuaternionTuple(socket.rotation),
-    anchorB: [...ZERO_VEC],
+    anchorA: [anchorAVec.x, anchorAVec.y, anchorAVec.z],
+    frameA: [frameAQuat.x, frameAQuat.y, frameAQuat.z, frameAQuat.w],
+    anchorB: [0, 0, 0],
     frameB: [...IDENTITY_QUAT],
   };
 }

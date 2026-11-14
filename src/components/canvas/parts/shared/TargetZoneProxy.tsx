@@ -90,14 +90,15 @@ function TargetZoneProxy({ id, position, rotation }: TargetZoneProxyProps) {
           dwellSecondsRef.current = 0;
         }
       }}
+      customColliders={
+        /* Elevated sensor volume so standing robot chassis triggers arrival cleanly */
+        <CuboidCollider
+          args={[WIDTH / 2, SENSOR_HALF_HEIGHT, DEPTH / 2]}
+          position={[0, SENSOR_HALF_HEIGHT, 0]}
+          sensor
+        />
+      }
     >
-      {/* Elevated sensor volume so standing robot chassis triggers arrival cleanly */}
-      <CuboidCollider
-        args={[WIDTH / 2, SENSOR_HALF_HEIGHT, DEPTH / 2]}
-        position={[0, SENSOR_HALF_HEIGHT, 0]}
-        sensor
-      />
-
       {/* Glowing base finish pad */}
       <mesh position={[0, HEIGHT / 2, 0]} receiveShadow>
         <boxGeometry args={[WIDTH, HEIGHT, DEPTH]} />

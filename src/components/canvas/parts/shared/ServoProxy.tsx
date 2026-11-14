@@ -68,6 +68,7 @@ function ServoProxy({ id, position, rotation = DEFAULT_ROTATION, attachedTo }: S
       enableSnapping
       colliderHalfExtents={COLLIDER_HALF_EXTENTS}
       mass={mass}
+      friction={0.2}
       restitution={0}
       collisionGroups={ROBOT_COLLISION_GROUPS}
       rigidBodyRef={rigidBodyRef}

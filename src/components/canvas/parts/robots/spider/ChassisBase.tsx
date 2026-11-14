@@ -1,7 +1,7 @@
 'use client';
 
 import { memo, useEffect, useRef } from 'react';
-import type { RapierRigidBody } from '@react-three/rapier';
+import { CuboidCollider, type RapierRigidBody } from '@react-three/rapier';
 import AnchorMarker, { type SocketFeedbackState } from '@/components/canvas/parts/shared/AnchorMarker';
 import AssemblyStand from '@/components/canvas/parts/shared/AssemblyStand';
 import DraggableRigidPart from '@/components/canvas/parts/shared/DraggableRigidPart';
@@ -69,8 +69,8 @@ function ChassisBase({ id, position, rotation }: ChassisBaseProps) {
         colliders={false}
         includeDefaultCollider
         colliderHalfExtents={colliderHalfExtents}
-        mass={CHASSIS_MASS}
-        friction={0.4}
+        mass={CHASSIS_MASS * 0.4}
+        friction={0.2}
         restitution={0}
         linearDamping={CHASSIS_LINEAR_DAMPING}
         angularDamping={CHASSIS_ANGULAR_DAMPING}
@@ -78,6 +78,18 @@ function ChassisBase({ id, position, rotation }: ChassisBaseProps) {
         collisionGroups={ROBOT_COLLISION_GROUPS}
         rigidBodyRef={rigidBodyRef}
         userData={CHASSIS_USER_DATA}
+        customColliders={
+          /* Flush low-CoM belly ballast keeps CoM below chassis midline without reducing clearance */
+          <CuboidCollider
+            args={[colliderHalfExtents[0] * 0.8, 0.02, colliderHalfExtents[2] * 0.8]}
+            position={[0, -(colliderHalfExtents[1] - 0.02), 0]}
+            mass={CHASSIS_MASS * 0.6}
+            friction={0.2}
+            restitution={0}
+            collisionGroups={ROBOT_COLLISION_GROUPS}
+            solverGroups={ROBOT_COLLISION_GROUPS}
+          />
+        }
       >
         <mesh
           castShadow

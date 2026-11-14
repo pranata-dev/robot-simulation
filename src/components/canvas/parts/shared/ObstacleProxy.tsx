@@ -1,6 +1,7 @@
 'use client';
 
 import { memo, useEffect, useRef } from 'react';
+import type { RapierRigidBody } from '@react-three/rapier';
 import DraggableRigidPart from '@/components/canvas/parts/shared/DraggableRigidPart';
 import { PART_CATALOG } from '@/lib/constants/socketRegistry';
 import { ENV_COLLISION_GROUPS } from '@/lib/physics/servoMotorControl';
@@ -23,13 +24,24 @@ const ROBOT_COLLIDER_TYPES = new Set<PartType>([
   'ESP32_DEVKIT',
   'SERVO_MG90S',
   'LEG_TIBIA',
+  'ULTRASONIC_HCSR04',
 ]);
 
 function ObstacleProxy({ id, position, rotation }: ObstacleProxyProps) {
+  const rigidBodyRef = useRef<RapierRigidBody | null>(null);
   const simulationStatus = useSimulationStore((state) => state.simulationStatus);
   const challengeStatus = useSimulationStore((state) => state.challengeStatus);
   const recordObstacleHit = useSimulationStore((state) => state.recordObstacleHit);
+  const registerRigidBody = useSimulationStore((state) => state.registerRigidBody);
+  const unregisterRigidBody = useSimulationStore((state) => state.unregisterRigidBody);
   const lastHitAtByPartRef = useRef<Map<string, number>>(new Map());
+
+  useEffect(() => {
+    registerRigidBody(id, rigidBodyRef);
+    return () => {
+      unregisterRigidBody(id, rigidBodyRef);
+    };
+  }, [id, registerRigidBody, unregisterRigidBody]);
 
   useEffect(() => {
     if (simulationStatus !== 'playing') {
@@ -43,6 +55,7 @@ function ObstacleProxy({ id, position, rotation }: ObstacleProxyProps) {
       partType="OBSTACLE_BLOCK"
       position={position}
       rotation={rotation}
+      rigidBodyRef={rigidBodyRef}
       rigidBodyTypeOverride="fixed"
       colliderHalfExtents={COLLIDER_HALF_EXTENTS}
       mass={0}

@@ -90,11 +90,14 @@ export function usePartDragAndSync({
       prev.rot[1] !== rotation[1] ||
       prev.rot[2] !== rotation[2];
     const resetTriggered = prev.resetNonce !== resetNonce && resetNonce > 0;
+    const statusChanged = prev.simulationStatus !== simulationStatus;
     const enteredPlaying = prev.simulationStatus !== 'playing' && simulationStatus === 'playing';
+    const stayingInPlayMode = simulationStatus === 'playing' && !enteredPlaying;
 
     if (
-      (!transformChanged && !resetTriggered && !enteredPlaying) ||
-      (!isDragEnabled && !enteredPlaying) ||
+      stayingInPlayMode ||
+      (!transformChanged && !resetTriggered && !statusChanged) ||
+      (!isDragEnabled && !statusChanged && !resetTriggered) ||
       isDraggingRef.current
     ) {
       lastSyncedRef.current = {
@@ -112,6 +115,15 @@ export function usePartDragAndSync({
     };
 
     syncRigidBodyToWorldTransform(rigidBodyRef.current, position, rotation);
+    if (enteredPlaying && rigidBodyRef.current) {
+      try {
+        // Rapier skips collider mass aggregation while kinematicPosition; recompute once dynamic.
+        rigidBodyRef.current.recomputeMassPropertiesFromColliders();
+        rigidBodyRef.current.wakeUp();
+      } catch {
+        // Ignore stale RigidBody wake-up during scene reset.
+      }
+    }
 
     const [qx, qy, qz, qw] = eulerToQuaternionTuple(rotation);
     const partObject = scene.getObjectByName(id);

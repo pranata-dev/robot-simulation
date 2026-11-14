@@ -2,17 +2,27 @@
 
 import { type RefObject, useEffect, useRef } from 'react';
 import { useFrame } from '@react-three/fiber';
+import * as THREE from 'three';
 import {
   type RapierRigidBody,
   useFixedJoint,
   useRapier,
   useRevoluteJoint,
 } from '@react-three/rapier';
+import { PART_CATALOG } from '@/lib/constants/hardwareCatalog';
 import {
+  measureRevoluteJointAngleRad,
   resolveJointConstraintSpec,
   syncRigidBodyToWorldTransform,
 } from '@/lib/physics/jointConstraints';
-import { stepServoMotorSlewAndTraction } from '@/lib/physics/servoMotorControl';
+import {
+  clampServoAngleDeg,
+  isValidImpulseJoint,
+  releaseDepletedServoMotor,
+  SERVO_MOTOR_DAMPING,
+  SERVO_MOTOR_STIFFNESS,
+  stepServoMotorSlewAndTraction,
+} from '@/lib/physics/servoMotorControl';
 import { useSimulationStore } from '@/store/useSimulationStore';
 import type { QuaternionTuple, Vector3Tuple, WorkspacePart } from '@/types/simulator';
 
@@ -29,10 +39,25 @@ interface PreJointPoseSyncProps {
  */
 function PreJointPoseSync({ workspaceParts, rigidBodyRefs }: PreJointPoseSyncProps) {
   const { world } = useRapier();
+  const didSyncRef = useRef(false);
 
   useEffect(() => {
+    if (didSyncRef.current) {
+      return;
+    }
+    didSyncRef.current = true;
     for (const part of workspaceParts) {
-      syncRigidBodyToWorldTransform(rigidBodyRefs[part.id]?.current, part.position, part.rotation);
+      const body = rigidBodyRefs[part.id]?.current;
+      syncRigidBodyToWorldTransform(body, part.position, part.rotation);
+      if (body) {
+        try {
+          // Ensure dynamic mass & inertia reflect collider masses before joints attach.
+          body.recomputeMassPropertiesFromColliders();
+          body.wakeUp();
+        } catch {
+          // Ignore stale RigidBody updates during scene teardown.
+        }
+      }
     }
     try {
       world.propagateModifiedBodyPositionsToColliders();
@@ -79,6 +104,8 @@ interface RevoluteMotorJointProps {
   anchorA: Vector3Tuple;
   anchorB: Vector3Tuple;
   axis: Vector3Tuple;
+  initialAngleRad: number;
+  totalRobotMassKg: number;
 }
 
 function RevoluteMotorJoint({
@@ -89,10 +116,12 @@ function RevoluteMotorJoint({
   anchorA,
   anchorB,
   axis,
+  initialAngleRad,
+  totalRobotMassKg,
 }: RevoluteMotorJointProps) {
   const { rapier, world } = useRapier();
-  const simulationStatus = useSimulationStore((state) => state.simulationStatus);
-  const currentAngleRadRef = useRef<number>(0);
+  const isRunning = useSimulationStore((state) => state.simulationStatus === 'playing');
+  const currentAngleRadRef = useRef<number>(initialAngleRad);
 
   const joint = useRevoluteJoint(parentRef as NonNullBodyRef, childRef as NonNullBodyRef, [
     anchorA,
@@ -101,27 +130,71 @@ function RevoluteMotorJoint({
   ]);
 
   useEffect(() => {
-    if (simulationStatus !== 'playing') {
-      currentAngleRadRef.current = 0;
+    const revoluteJoint = joint.current;
+    if (!isRunning) {
+      currentAngleRadRef.current = initialAngleRad;
+      return;
     }
-  }, [simulationStatus]);
+    if (isValidImpulseJoint(revoluteJoint, world)) {
+      try {
+        revoluteJoint.configureMotorModel(rapier.MotorModel.ForceBased);
+        revoluteJoint.configureMotorPosition(
+          initialAngleRad,
+          SERVO_MOTOR_STIFFNESS,
+          SERVO_MOTOR_DAMPING,
+        );
+      } catch {
+        // Ignore stale joint handle if Rapier world was recreated during Play/Stop toggle.
+      }
+    }
+  }, [initialAngleRad, isRunning, joint, rapier, world]);
 
   useFrame((_, delta) => {
     const revoluteJoint = joint.current;
-    if (simulationStatus !== 'playing' || !revoluteJoint) return;
+    if (!isRunning || !revoluteJoint) return;
 
-    const targetDeg = useSimulationStore.getState().servoTargetAngles[servoId] ?? 0;
-    currentAngleRadRef.current = stepServoMotorSlewAndTraction({
+    const storeState = useSimulationStore.getState();
+    const physicalAngleRad = measureRevoluteJointAngleRad(parentRef.current, childRef.current, axis);
+    if (storeState.batteryLevel <= 0) {
+      releaseDepletedServoMotor({
+        rapier,
+        world,
+        revoluteJoint,
+        parentBody: parentRef.current,
+        childBody: childRef.current,
+        chassisBody: chassisRef?.current,
+        currentAngleRad: physicalAngleRad ?? currentAngleRadRef.current,
+      });
+      return;
+    }
+
+    const clampedDelta = Math.min(Math.max(delta, 0), 0.05);
+    const targetDeg = clampServoAngleDeg(storeState.servoTargetAngles[servoId] ?? 0);
+    const prevAngleRad = currentAngleRadRef.current;
+    const nextAngleRad = stepServoMotorSlewAndTraction({
       rapier,
       world,
       revoluteJoint,
-      currentAngleRad: currentAngleRadRef.current,
+      currentAngleRad: prevAngleRad,
+      initialAngleRad,
       targetAngleDeg: targetDeg,
-      delta,
+      delta: clampedDelta,
       parentBody: parentRef.current,
       childBody: childRef.current,
       chassisBody: chassisRef?.current,
+      totalRobotMassKg,
     });
+    currentAngleRadRef.current = nextAngleRad;
+
+    const targetRad = initialAngleRad + THREE.MathUtils.degToRad(targetDeg);
+    const hasCommandedMotion =
+      Math.abs(targetRad - nextAngleRad) > 1e-3 ||
+      Math.abs(nextAngleRad - prevAngleRad) > 1e-4 ||
+      (physicalAngleRad !== null && Math.abs(targetRad - physicalAngleRad) > 0.02);
+
+    if (hasCommandedMotion && clampedDelta > 0 && storeState.powerDrainRate > 0) {
+      storeState.drainBattery(storeState.powerDrainRate * clampedDelta);
+    }
   });
 
   return null;
@@ -132,15 +205,21 @@ function RevoluteMotorJoint({
  * strictly during active simulation playback after RigidBody poses match snapLogic transforms.
  */
 export default function JointSystem() {
-  const simulationStatus = useSimulationStore((state) => state.simulationStatus);
+  const isRunning = useSimulationStore((state) => state.simulationStatus === 'playing');
   const workspaceParts = useSimulationStore((state) => state.workspaceParts);
   const rigidBodyRefs = useSimulationStore((state) => state.rigidBodyRefs);
 
-  if (simulationStatus !== 'playing') {
+  if (!isRunning) {
     return null;
   }
 
   const partsById = new Map(workspaceParts.map((part) => [part.id, part]));
+  let totalRobotMassKg = 0;
+  for (const part of workspaceParts) {
+    if (part.type !== 'OBSTACLE_BLOCK' && part.type !== 'TARGET_ZONE') {
+      totalRobotMassKg += PART_CATALOG[part.type]?.mass ?? 0;
+    }
+  }
 
   return (
     <>
@@ -172,6 +251,8 @@ export default function JointSystem() {
               anchorA={spec.anchorA}
               anchorB={spec.anchorB}
               axis={spec.axis}
+              initialAngleRad={spec.initialAngleRad}
+              totalRobotMassKg={totalRobotMassKg}
             />
           );
         }

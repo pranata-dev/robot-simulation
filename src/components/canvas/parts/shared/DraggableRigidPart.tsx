@@ -3,10 +3,15 @@
 import { type ReactNode, type RefObject, useCallback, useMemo, useRef } from 'react';
 import type * as THREE from 'three';
 import { DragControls } from '@react-three/drei';
-import type { ThreeEvent } from '@react-three/fiber';
+import { type ThreeEvent } from '@react-three/fiber';
+import {
+  CHASSIS_ANGULAR_DAMPING,
+  CHASSIS_LINEAR_DAMPING,
+} from '@/lib/physics/servoMotorControl';
 import {
   type CollisionEnterHandler,
   CuboidCollider,
+  interactionGroups,
   type IntersectionEnterHandler,
   type IntersectionExitHandler,
   type RapierRigidBody,
@@ -17,6 +22,7 @@ import {
 import type { ActiveCollisionTypes, InteractionGroups } from '@dimforge/rapier3d-compat';
 import PartSelectionOverlay from '@/components/canvas/parts/shared/PartSelectionOverlay';
 import { usePartDragAndSync } from '@/hooks/usePartDragAndSync';
+import { BATTERY_PACK_MASS } from '@/lib/constants/hardwareCatalog';
 import { eulerToQuaternionTuple } from '@/lib/physics/jointConstraints';
 import { useSimulationStore } from '@/store/useSimulationStore';
 import type { PartType, Vector3Tuple } from '@/types/simulator';
@@ -46,6 +52,7 @@ interface DraggableRigidPartProps {
   onIntersectionEnter?: IntersectionEnterHandler;
   onIntersectionExit?: IntersectionExitHandler;
   onCollisionEnter?: CollisionEnterHandler;
+  customColliders?: ReactNode;
   children: ReactNode;
 }
 
@@ -81,6 +88,7 @@ export default function DraggableRigidPart({
   onIntersectionEnter,
   onIntersectionExit,
   onCollisionEnter,
+  customColliders,
   children,
 }: DraggableRigidPartProps) {
   const internalRigidBodyRef = useRef<RapierRigidBody | null>(null);
@@ -92,7 +100,8 @@ export default function DraggableRigidPart({
   const isSelected = useSimulationStore((state) => state.selectedPartId === id);
   const selectPart = useSimulationStore((state) => state.selectPart);
   const rigidBodyType =
-    rigidBodyTypeOverride ?? (simulationStatus === 'playing' ? 'dynamic' : 'fixed');
+    rigidBodyTypeOverride ??
+    (simulationStatus === 'playing' ? 'dynamic' : 'kinematicPosition');
   const resolvedQuaternion = useMemo(
     () => eulerToQuaternionTuple(rotation),
     [rotation],
@@ -105,6 +114,16 @@ export default function DraggableRigidPart({
     }),
     [id, partType, userData],
   );
+
+  const resolvedCollisionGroups =
+    partType === 'BATTERY_2S'
+      ? interactionGroups(1, [0])
+      : (collisionGroups ??
+        (partType === 'OBSTACLE_BLOCK' || partType === 'TARGET_ZONE'
+          ? interactionGroups(0, [0, 1])
+          : interactionGroups(1, [0])));
+  const resolvedMass = partType === 'BATTERY_2S' ? BATTERY_PACK_MASS : mass;
+  const resolvedCanSleep = canSleep ?? false;
 
   const { isDragEnabled, handleDragStart, handleDragMove, handleDragEnd } = usePartDragAndSync({
     id,
@@ -128,22 +147,32 @@ export default function DraggableRigidPart({
     [id, selectPart],
   );
 
+  const isPlayingChassis = simulationStatus === 'playing' && partType === 'CHASSIS_BASE';
+  const resolvedRestitution =
+    partType === 'OBSTACLE_BLOCK' || partType === 'TARGET_ZONE' ? restitution : 0;
+  const resolvedLinearDamping = isPlayingChassis
+    ? CHASSIS_LINEAR_DAMPING
+    : linearDamping;
+  const resolvedAngularDamping = isPlayingChassis
+    ? CHASSIS_ANGULAR_DAMPING
+    : angularDamping;
+
   return (
     <RigidBody
       ref={rigidBodyRef}
       name={id}
       type={rigidBodyType}
       colliders={colliders}
-      canSleep={canSleep ?? (rigidBodyType === 'dynamic' ? false : true)}
-      restitution={restitution}
+      canSleep={resolvedCanSleep}
+      restitution={resolvedRestitution}
       friction={colliders ? friction : undefined}
       position={position}
       quaternion={resolvedQuaternion}
-      linearDamping={linearDamping}
-      angularDamping={angularDamping}
+      linearDamping={resolvedLinearDamping}
+      angularDamping={resolvedAngularDamping}
       activeCollisionTypes={activeCollisionTypes}
-      collisionGroups={collisionGroups}
-      solverGroups={collisionGroups}
+      collisionGroups={resolvedCollisionGroups}
+      solverGroups={resolvedCollisionGroups}
       userData={resolvedUserData}
       sensor={sensor}
       onIntersectionEnter={onIntersectionEnter}
@@ -153,14 +182,15 @@ export default function DraggableRigidPart({
       {includeDefaultCollider && colliders === false && (
         <CuboidCollider
           args={colliderHalfExtents}
-          mass={mass}
+          mass={resolvedMass}
           friction={friction}
-          restitution={restitution}
-          collisionGroups={collisionGroups}
-          solverGroups={collisionGroups}
+          restitution={resolvedRestitution}
+          collisionGroups={resolvedCollisionGroups}
+          solverGroups={resolvedCollisionGroups}
           sensor={sensor}
         />
       )}
+      {customColliders}
       <DragControls
         ref={dragGroupRef}
         autoTransform={false}
