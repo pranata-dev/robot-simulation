@@ -5,12 +5,12 @@ import { Check, Copy, Play, RotateCcw, Sliders } from 'lucide-react';
 import { formatServoStepDsl, getServoPinAssignments } from '@/lib/microcontroller/servoPinMap';
 import { useSimulationStore } from '@/store/useSimulationStore';
 
-const SLIDER_MIN_DEG = -60;
-const SLIDER_MAX_DEG = 60;
+const SLIDER_MIN_DEG = -45;
+const SLIDER_MAX_DEG = 45;
 
 /**
  * Interactive manual servo calibration drawer allowing learners to sweep individual
- * mounted ServoProxy joints (-60° to +60°), center all joints, or append current angles
+ * mounted ServoProxy joints (-45° to +45°), center all joints, or append current angles
  * directly into the control script as a DSL step.
  */
 export default function ServoCalibrationPanel() {

@@ -211,13 +211,14 @@ export default function CodeEditorPanel() {
               )}
 
               <p className="text-[11px] leading-snug text-[#827148]/75">
-                DSL: <code className="font-mono font-semibold">PIN_1: 90</code> /{' '}
-                <code className="font-mono font-semibold">P1: -20</code> /{' '}
-                <code className="font-mono font-semibold">ESP_D13: -45</code> &middot; Worker JS:{' '}
+                DSL: <code className="font-mono font-semibold">PIN_1: 45</code> /{' '}
+                <code className="font-mono font-semibold">IF_OBSTACLE_LESS_THAN: 15</code> /{' '}
+                <code className="font-mono font-semibold">ELSE</code> /{' '}
+                <code className="font-mono font-semibold">END_IF</code> &middot; JS:{' '}
                 <code className="font-mono font-semibold">setServoAngle</code>,{' '}
                 <code className="font-mono font-semibold">delay</code>,{' '}
-                <code className="font-mono font-semibold">loop</code>,{' '}
-                <code className="font-mono font-semibold">log</code>.
+                <code className="font-mono font-semibold">getUltrasonicDistance</code>,{' '}
+                <code className="font-mono font-semibold">loop</code>.
               </p>
             </>
           )}

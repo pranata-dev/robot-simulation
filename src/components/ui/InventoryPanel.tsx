@@ -1,12 +1,15 @@
 'use client';
 
-import { Box, Cable, Cpu, Crosshair, Flag, Moon, RotateCcw, Sun } from 'lucide-react';
+import { Box, Cable, Cpu, Crosshair, Flag, Moon, Radar, RotateCcw, Sun } from 'lucide-react';
 import { useSimulationStore } from '@/store/useSimulationStore';
 import type { PartType } from '@/types/simulator';
 
 function PartIcon({ type }: { type: PartType }) {
   if (type === 'CHASSIS_BASE' || type === 'OBSTACLE_BLOCK') {
     return <Box className="h-4 w-4 shrink-0" />;
+  }
+  if (type === 'ULTRASONIC_HCSR04') {
+    return <Radar className="h-4 w-4 shrink-0" />;
   }
   if (type === 'TARGET_ZONE') {
     return <Flag className="h-4 w-4 shrink-0" />;

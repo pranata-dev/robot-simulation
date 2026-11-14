@@ -17,12 +17,18 @@ import {
 } from '@/lib/constants/socketRegistry';
 import { validateWiringTopology } from '@/lib/microcontroller/circuitValidator';
 import {
+  extractPinTokensFromScript,
+  resolveExplicitEspPinId,
+  resolveServoIdsForPinTarget,
+} from '@/lib/microcontroller/servoPinMap';
+import {
   clearPhysicsRegistry,
   resetAllRigidBodiesPhysicsState,
   setPartDragging,
   unregisterPartRigidBody,
   unregisterServoHornRef,
 } from '@/lib/physics/rigidBodyRegistry';
+import { computeFootClearanceLift } from '@/lib/physics/footClearance';
 import { clampServoAngleDeg } from '@/lib/physics/servoMotorControl';
 import {
   parseAndValidateSimulationSnapshot,
@@ -86,7 +92,12 @@ export interface SimulationData {
   scriptError: string | null;
   servoTargetAngles: Record<string, number>;
   servoAngles: Record<string, number>;
+  sensorDistances: Record<string, number>;
+  batteryLevel: number;
+  powerDrainRate: number;
   rigidBodyRefs: Record<string, RefObject<RapierRigidBody | null>>;
+  assembledPartsSnapshot: WorkspacePart[] | null;
+  simulationRunId: number;
   runId: number;
   resetNonce: number;
   isLevelComplete: boolean;
@@ -145,6 +156,8 @@ export interface SimulationActions {
   completeLevel: () => void;
   completeChallenge: () => void;
   recordObstacleHit: () => void;
+  updateSensorDistance: (partId: string, distance: number) => void;
+  drainBattery: (amount: number) => void;
   setEmbedConfig: (config: SimulationEmbedConfig) => void;
   setPerformanceMode: (enabled: boolean) => void;
   exportSimulationSnapshot: () => string;
@@ -173,6 +186,7 @@ const DEFAULT_SCRIPT = [
 const ESP32_PWM_PINS = ESP32_PINS.filter((pin) => pin.role === 'PWM');
 const WORKER_WATCHDOG_TIMEOUT_MS = 1500;
 const WORKER_WATCHDOG_POLL_MS = 250;
+const SENSOR_SYNC_INTERVAL_MS = 100;
 const MAX_SCRIPT_LOG_ENTRIES = 100;
 const MAX_HISTORY_ENTRIES = 30;
 
@@ -180,20 +194,28 @@ let activeExecutionRunId = 0;
 let activeScriptWorker: Worker | null = null;
 let activeWorkerBlobUrl: string | null = null;
 let activeWatchdogTimerId: ReturnType<typeof setInterval> | null = null;
+let activeSensorSyncTimerId: ReturnType<typeof setInterval> | null = null;
 
 function terminateActiveScriptWorker(): void {
   if (activeWatchdogTimerId !== null) {
     clearInterval(activeWatchdogTimerId);
     activeWatchdogTimerId = null;
   }
+  if (activeSensorSyncTimerId !== null) {
+    clearInterval(activeSensorSyncTimerId);
+    activeSensorSyncTimerId = null;
+  }
   if (activeScriptWorker !== null) {
+    const worker = activeScriptWorker;
+    activeScriptWorker = null;
+    worker.onmessage = null;
+    worker.onerror = null;
     try {
-      activeScriptWorker.postMessage({ type: 'STOP' } satisfies WorkerInboundMessage);
+      worker.postMessage({ type: 'STOP' } satisfies WorkerInboundMessage);
     } catch {
       // Ignore postMessage failure if worker already exited.
     }
-    activeScriptWorker.terminate();
-    activeScriptWorker = null;
+    worker.terminate();
   }
   if (activeWorkerBlobUrl !== null) {
     URL.revokeObjectURL(activeWorkerBlobUrl);
@@ -214,8 +236,10 @@ function createScriptLogEntry(level: WorkerLogLevel, message: string): ScriptCon
 const ACTIVE_INVENTORY_TYPES: readonly PartType[] = [
   'CHASSIS_BASE',
   'ESP32_DEVKIT',
+  'BATTERY_2S',
   'SERVO_MG90S',
   'LEG_TIBIA',
+  'ULTRASONIC_HCSR04',
   'OBSTACLE_BLOCK',
   'TARGET_ZONE',
 ];
@@ -298,18 +322,42 @@ function zeroRigidBodyVelocities(
   }
 }
 
+function cloneWorkspaceParts(workspaceParts: readonly WorkspacePart[]): WorkspacePart[] {
+  return workspaceParts.map((part) => ({
+    ...part,
+    position: [...part.position] as Vector3Tuple,
+    rotation: [...part.rotation] as Vector3Tuple,
+  }));
+}
+
+function buildAssembledStandingParts(workspaceParts: readonly WorkspacePart[]): WorkspacePart[] {
+  const cloned = cloneWorkspaceParts(workspaceParts);
+  const rootIds = new Set(cloned.filter((part) => !part.attachedTo).map((part) => part.id));
+  return reconcileChassisElevations(resolveHierarchyWorldTransforms(cloned, rootIds));
+}
+
 function reconcileChassisElevations(workspaceParts: WorkspacePart[]): WorkspacePart[] {
   const workingY = getActiveChassisAssemblyWorkingY();
   const halfHeight = getActiveChassisHalfHeight();
   let nextParts = workspaceParts;
   for (const part of nextParts) {
     if (part.type !== 'CHASSIS_BASE') continue;
-    const targetY = hasAttachedLegDescendant(part.id, nextParts) ? workingY : halfHeight;
-    const dy = targetY - part.position[1];
-    if (Math.abs(dy) <= 1e-6) continue;
-
+    const hasLegs = hasAttachedLegDescendant(part.id, nextParts);
+    const targetY = hasLegs ? workingY : halfHeight;
     const affectedIds = collectDescendantIds(part.id, nextParts);
     affectedIds.add(part.id);
+    let dy = targetY - part.position[1];
+    if (hasLegs) {
+      // Lift further if any foot sphere (incl. its leg rotation) would sit below y = 0.03.
+      const shifted = nextParts.map((entry) =>
+        affectedIds.has(entry.id)
+          ? { ...entry, position: [entry.position[0], entry.position[1] + dy, entry.position[2]] as Vector3Tuple }
+          : entry,
+      );
+      dy += computeFootClearanceLift(shifted, affectedIds);
+    }
+    if (Math.abs(dy) <= 1e-6) continue;
+
     nextParts = nextParts.map((entry) =>
       affectedIds.has(entry.id)
         ? { ...entry, position: [entry.position[0], entry.position[1] + dy, entry.position[2]] }
@@ -471,7 +519,12 @@ function createInitialData(blueprintId: RobotBlueprintId = 'spider'): Simulation
     scriptError: null,
     servoTargetAngles: {},
     servoAngles: {},
+    sensorDistances: {},
+    batteryLevel: 100,
+    powerDrainRate: 0.5,
     rigidBodyRefs: {},
+    assembledPartsSnapshot: null,
+    simulationRunId: 0,
     runId: 0,
     resetNonce: 0,
     isLevelComplete: false,
@@ -507,6 +560,9 @@ export function normalizeCanonicalPinAlias(rawToken: string): string | null {
 }
 
 function resolveEsp32PinId(rawToken: string): PinId | null {
+  const explicitPin = resolveExplicitEspPinId(rawToken);
+  if (explicitPin) return explicitPin;
+
   const canonicalAlias = normalizeCanonicalPinAlias(rawToken);
   if (canonicalAlias) {
     const index = Number.parseInt(canonicalAlias.slice(1), 10);
@@ -527,13 +583,26 @@ function resolveTargetServoIds(
   workspaceParts: readonly WorkspacePart[],
   wires: readonly WireConnection[],
   wiringValidation: WiringValidationResult,
+  peerTargets: readonly string[] = [],
 ): string[] {
-  const activeSet = new Set(wiringValidation.activeServoIds);
+  const resolvedIds = resolveServoIdsForPinTarget({
+    target: servoTarget,
+    workspaceParts,
+    wires,
+    pinToServoIds: wiringValidation.pinToServoIds,
+    activeServoIds: wiringValidation.activeServoIds,
+    peerTargets,
+  });
+  if (resolvedIds.length > 0) {
+    return resolvedIds;
+  }
+
   const pinId = resolveEsp32PinId(servoTarget);
   if (pinId) {
     const wiredServoIds = getWiredServoIdsForPin(pinId, workspaceParts, wires);
     const mappedServoIds = wiringValidation.pinToServoIds[pinId] ?? [];
     const combined = Array.from(new Set([...mappedServoIds, ...wiredServoIds]));
+    const activeSet = new Set(wiringValidation.activeServoIds);
     if (activeSet.size > 0) {
       const activeFiltered = combined.filter((servoId) => activeSet.has(servoId));
       if (activeFiltered.length > 0) {
@@ -698,10 +767,12 @@ export const useSimulationStore = create<SimulationState>()((set, get) => ({
       const nextRigidBodyRefs = { ...state.rigidBodyRefs };
       const nextServoTargetAngles = { ...state.servoTargetAngles };
       const nextServoAngles = { ...state.servoAngles };
+      const nextSensorDistances = { ...state.sensorDistances };
       for (const removedId of idsToRemove) {
         delete nextRigidBodyRefs[removedId];
         delete nextServoTargetAngles[removedId];
         delete nextServoAngles[removedId];
+        delete nextSensorDistances[removedId];
       }
 
       const nextWires = state.wires.filter(
@@ -736,6 +807,7 @@ export const useSimulationStore = create<SimulationState>()((set, get) => ({
         rigidBodyRefs: nextRigidBodyRefs,
         servoTargetAngles: nextServoTargetAngles,
         servoAngles: nextServoAngles,
+        sensorDistances: nextSensorDistances,
       };
     });
   },
@@ -987,13 +1059,15 @@ export const useSimulationStore = create<SimulationState>()((set, get) => ({
   },
 
   setPinAngle: (pinAlias, angleDeg) => {
-    if (get().readOnly) return;
-    const { workspaceParts, wires, wiringValidation } = get();
+    if (get().readOnly || get().batteryLevel <= 0) return;
+    const { workspaceParts, wires, wiringValidation, script } = get();
+    const scriptPeers = extractPinTokensFromScript(script);
     const targetServoIds = resolveTargetServoIds(
       pinAlias,
       workspaceParts,
       wires,
       wiringValidation,
+      scriptPeers,
     );
     if (targetServoIds.length === 0) return;
 
@@ -1013,7 +1087,7 @@ export const useSimulationStore = create<SimulationState>()((set, get) => ({
   },
 
   setServoAngleByPartId: (partId, angleDeg) => {
-    if (get().readOnly) return;
+    if (get().readOnly || get().batteryLevel <= 0) return;
     const clampedAngle = clampServoAngleDeg(angleDeg);
     set((state) => ({
       servoTargetAngles: {
@@ -1029,7 +1103,22 @@ export const useSimulationStore = create<SimulationState>()((set, get) => ({
 
   setServoAngle: (servoId, angleDeg) => {
     if (get().readOnly) return;
-    if (resolveEsp32PinId(servoId) !== null) {
+    const { workspaceParts, wires, wiringValidation, script } = get();
+    const isDirectPartId = workspaceParts.some(
+      (part) => part.type === 'SERVO_MG90S' && part.id === servoId.trim(),
+    );
+    if (isDirectPartId) {
+      get().setServoAngleByPartId(servoId.trim(), angleDeg);
+      return;
+    }
+    const targetServoIds = resolveTargetServoIds(
+      servoId,
+      workspaceParts,
+      wires,
+      wiringValidation,
+      extractPinTokensFromScript(script),
+    );
+    if (targetServoIds.length > 0) {
       get().setPinAngle(servoId, angleDeg);
       return;
     }
@@ -1066,22 +1155,29 @@ export const useSimulationStore = create<SimulationState>()((set, get) => ({
     activeExecutionRunId += 1;
     terminateActiveScriptWorker();
 
-    set((state) => ({
-      wiringValidation,
-      showCircuitDiagnostics: false,
-      scriptError: null,
-      viewMode: 'normal',
-      workspaceParts: reconcileChassisElevations(
-        resolveHierarchyWorldTransforms(state.workspaceParts),
-      ),
-      rigidBodyRefs: state.simulationStatus === 'playing' ? state.rigidBodyRefs : {},
-      runId: state.simulationStatus === 'playing' ? state.runId : state.runId + 1,
-      simulationStatus: 'playing',
-      challengeStatus: 'in_progress',
-      simulationStartedAt: state.simulationStartedAt ?? Date.now(),
-      activeDraftWire: null,
-      activeSnapTarget: null,
-    }));
+    set((state) => {
+      const wasPlaying = state.simulationStatus === 'playing';
+      const standingParts = buildAssembledStandingParts(
+        state.assembledPartsSnapshot ?? state.workspaceParts,
+      );
+      return {
+        wiringValidation,
+        showCircuitDiagnostics: false,
+        scriptError: null,
+        viewMode: 'normal',
+        assembledPartsSnapshot: state.assembledPartsSnapshot ?? cloneWorkspaceParts(standingParts),
+        workspaceParts: wasPlaying ? state.workspaceParts : standingParts,
+        rigidBodyRefs: state.rigidBodyRefs,
+        simulationRunId: wasPlaying ? state.simulationRunId : state.simulationRunId + 1,
+        runId: wasPlaying ? state.runId : state.runId + 1,
+        simulationStatus: 'playing',
+        challengeStatus: 'in_progress',
+        batteryLevel: wasPlaying ? state.batteryLevel : 100,
+        simulationStartedAt: state.simulationStartedAt ?? Date.now(),
+        activeDraftWire: null,
+        activeSnapTarget: null,
+      };
+    });
   },
 
   loadPreset: (presetId) => {
@@ -1156,8 +1252,11 @@ export const useSimulationStore = create<SimulationState>()((set, get) => ({
         isLevelComplete: false,
         servoTargetAngles: {},
         servoAngles: {},
+        sensorDistances: {},
+        batteryLevel: 100,
         rigidBodyRefs: {},
         scriptLogs: [],
+        assembledPartsSnapshot: null,
         scriptError: null,
         resetNonce: state.resetNonce + 1,
       };
@@ -1209,7 +1308,10 @@ export const useSimulationStore = create<SimulationState>()((set, get) => ({
         ...state.historyFuture.slice(-(MAX_HISTORY_ENTRIES - 1)),
         captureHistorySnapshot(state),
       ];
-      return buildRestoredHistorySlice(state, targetSnapshot, nextPast, nextFuture);
+      return {
+        ...buildRestoredHistorySlice(state, targetSnapshot, nextPast, nextFuture),
+        assembledPartsSnapshot: null,
+      };
     });
   },
 
@@ -1227,7 +1329,10 @@ export const useSimulationStore = create<SimulationState>()((set, get) => ({
         ...state.historyPast.slice(-(MAX_HISTORY_ENTRIES - 1)),
         captureHistorySnapshot(state),
       ];
-      return buildRestoredHistorySlice(state, targetSnapshot, nextPast, nextFuture);
+      return {
+        ...buildRestoredHistorySlice(state, targetSnapshot, nextPast, nextFuture),
+        assembledPartsSnapshot: null,
+      };
     });
   },
 
@@ -1251,7 +1356,9 @@ export const useSimulationStore = create<SimulationState>()((set, get) => ({
   },
 
   runSimulation: () => {
-    const { workspaceParts, wires, script, wiringMode } = get();
+    terminateActiveScriptWorker();
+
+    const { workspaceParts, wires, wiringMode } = get();
     const wiringValidation = validateWiringTopology(workspaceParts, wires, wiringMode);
     if (!wiringValidation.isValid) {
       set({
@@ -1261,31 +1368,45 @@ export const useSimulationStore = create<SimulationState>()((set, get) => ({
       return;
     }
 
-    terminateActiveScriptWorker();
+    const wasAlreadyPlaying = get().simulationStatus === 'playing';
+    if (wasAlreadyPlaying) {
+      zeroRigidBodyVelocities(get().rigidBodyRefs);
+    }
+
     const runId = ++activeExecutionRunId;
 
-    set((state) => ({
-      wiringValidation,
-      showCircuitDiagnostics: false,
-      scriptLogs: [],
-      scriptError: null,
-      servoTargetAngles: {},
-      servoAngles: {},
-      viewMode: 'normal',
-      workspaceParts: reconcileChassisElevations(
-        resolveHierarchyWorldTransforms(state.workspaceParts),
-      ),
-      rigidBodyRefs: {},
-      runId: state.runId + 1,
-      simulationStatus: 'playing',
-      challengeStatus: 'in_progress',
-      obstacleHits: 0,
-      simulationStartedAt: Date.now(),
-      completionTimeMs: null,
-      isLevelComplete: false,
-      activeDraftWire: null,
-      activeSnapTarget: null,
-    }));
+    set((state) => {
+      const standingParts = buildAssembledStandingParts(
+        state.assembledPartsSnapshot ?? state.workspaceParts,
+      );
+      return {
+        wiringValidation,
+        showCircuitDiagnostics: false,
+        scriptLogs: [],
+        scriptError: null,
+        servoTargetAngles: {},
+        servoAngles: {},
+        sensorDistances: {},
+        batteryLevel: 100,
+        viewMode: 'normal',
+        assembledPartsSnapshot: cloneWorkspaceParts(standingParts),
+        workspaceParts: standingParts,
+        rigidBodyRefs: wasAlreadyPlaying ? {} : state.rigidBodyRefs,
+        simulationRunId: state.simulationRunId + 1,
+        runId: state.runId + 1,
+        resetNonce: wasAlreadyPlaying ? state.resetNonce + 1 : state.resetNonce,
+        simulationStatus: 'playing',
+        challengeStatus: 'in_progress',
+        obstacleHits: 0,
+        simulationStartedAt: Date.now(),
+        completionTimeMs: null,
+        isLevelComplete: false,
+        activeDraftWire: null,
+        activeSnapTarget: null,
+      };
+    });
+
+    const latestScript = get().script;
 
     if (typeof Worker === 'undefined') {
       set({
@@ -1338,6 +1459,28 @@ export const useSimulationStore = create<SimulationState>()((set, get) => ({
       if (activeWatchdogTimerId !== null) {
         clearInterval(activeWatchdogTimerId);
       }
+      if (activeSensorSyncTimerId !== null) {
+        clearInterval(activeSensorSyncTimerId);
+      }
+
+      activeSensorSyncTimerId = setInterval(() => {
+        if (
+          activeScriptWorker !== worker ||
+          runId !== activeExecutionRunId ||
+          get().simulationStatus !== 'playing'
+        ) {
+          return;
+        }
+        try {
+          worker.postMessage({
+            type: 'SENSOR_DATA',
+            sensorDistances: get().sensorDistances,
+            batteryLevel: get().batteryLevel,
+          } satisfies WorkerInboundMessage);
+        } catch {
+          // Ignore transient postMessage failure if worker exited.
+        }
+      }, SENSOR_SYNC_INTERVAL_MS);
 
       activeWatchdogTimerId = setInterval(() => {
         if (
@@ -1371,15 +1514,24 @@ export const useSimulationStore = create<SimulationState>()((set, get) => ({
           case 'HEARTBEAT':
             return;
           case 'SET_SERVO_ANGLE': {
+            if (get().batteryLevel <= 0) return;
             get().setServoAngle(payload.servoTarget, payload.angleDeg);
             return;
           }
           case 'SET_SERVO_BATCH': {
+            if (get().batteryLevel <= 0) return;
             const {
               workspaceParts: currentParts,
               wires: currentWires,
               wiringValidation: currentValidation,
+              script: currentScript,
             } = get();
+            const peerTargets = Array.from(
+              new Set([
+                ...extractPinTokensFromScript(currentScript),
+                ...payload.commands.map((cmd) => cmd.servoTarget),
+              ]),
+            );
             const batchedUpdates: Array<{ servoIds: string[]; angleDeg: number }> = [];
             for (const cmd of payload.commands) {
               const targetServoIds = resolveTargetServoIds(
@@ -1387,6 +1539,7 @@ export const useSimulationStore = create<SimulationState>()((set, get) => ({
                 currentParts,
                 currentWires,
                 currentValidation,
+                peerTargets,
               );
               if (targetServoIds.length > 0) {
                 batchedUpdates.push({
@@ -1395,9 +1548,7 @@ export const useSimulationStore = create<SimulationState>()((set, get) => ({
                 });
               }
             }
-            if (batchedUpdates.length === 0) {
-              return;
-            }
+            if (batchedUpdates.length === 0) return;
             set((state) => {
               const nextServoTargetAngles = { ...state.servoTargetAngles };
               const nextServoAngles = { ...state.servoAngles };
@@ -1424,11 +1575,33 @@ export const useSimulationStore = create<SimulationState>()((set, get) => ({
           case 'COMPLETED': {
             terminateActiveScriptWorker();
             if (runId === activeExecutionRunId) {
-              set({ simulationStatus: 'idle' });
+              const entry = createScriptLogEntry(
+                'info',
+                'Script sequence completed (servos holding target angles — click Stop to reset).',
+              );
+              set((state) => ({
+                scriptLogs: [...state.scriptLogs.slice(-(MAX_SCRIPT_LOG_ENTRIES - 1)), entry],
+              }));
             }
             return;
           }
           case 'ERROR': {
+            const isBatteryDepleted =
+              get().batteryLevel <= 0 || payload.message.includes('BATTERY DEPLETED');
+            if (isBatteryDepleted) {
+              terminateActiveScriptWorker();
+              activeExecutionRunId += 1;
+              const depletedMsg = payload.message || 'ERROR: BATTERY DEPLETED';
+              set((state) => ({
+                batteryLevel: 0,
+                scriptError: depletedMsg,
+                scriptLogs: [
+                  ...state.scriptLogs.slice(-(MAX_SCRIPT_LOG_ENTRIES - 1)),
+                  createScriptLogEntry('error', depletedMsg),
+                ],
+              }));
+              return;
+            }
             failRunWithMessage(payload.message);
             return;
           }
@@ -1451,7 +1624,9 @@ export const useSimulationStore = create<SimulationState>()((set, get) => ({
       worker.postMessage({
         type: 'START',
         runId,
-        script,
+        script: latestScript,
+        sensorDistances: get().sensorDistances,
+        batteryLevel: get().batteryLevel,
       } satisfies WorkerInboundMessage);
     };
 
@@ -1462,19 +1637,25 @@ export const useSimulationStore = create<SimulationState>()((set, get) => ({
     activeExecutionRunId += 1;
     terminateActiveScriptWorker();
     zeroRigidBodyVelocities(get().rigidBodyRefs);
-    set((state) => ({
-      simulationStatus: 'idle',
-      challengeStatus: state.challengeStatus === 'in_progress' ? 'idle' : state.challengeStatus,
-      servoTargetAngles: {},
-      servoAngles: {},
-      rigidBodyRefs: {},
-      activeSnapTarget: null,
-      activeDraftWire: null,
-      workspaceParts: reconcileChassisElevations(
-        resolveHierarchyWorldTransforms(state.workspaceParts),
-      ),
-      resetNonce: state.resetNonce + 1,
-    }));
+    set((state) => {
+      const restoredParts = buildAssembledStandingParts(
+        state.assembledPartsSnapshot ?? state.workspaceParts,
+      );
+      return {
+        simulationStatus: 'idle',
+        challengeStatus: state.challengeStatus === 'in_progress' ? 'idle' : state.challengeStatus,
+        assembledPartsSnapshot: null,
+        servoTargetAngles: {},
+        servoAngles: {},
+        sensorDistances: {},
+        batteryLevel: 100,
+        rigidBodyRefs: {},
+        activeSnapTarget: null,
+        activeDraftWire: null,
+        workspaceParts: restoredParts,
+        resetNonce: state.resetNonce + 1,
+      };
+    });
   },
 
   setSimulationStatus: (status) => {
@@ -1487,22 +1668,28 @@ export const useSimulationStore = create<SimulationState>()((set, get) => ({
         set({ wiringValidation, showCircuitDiagnostics: true });
         return;
       }
-      set((state) => ({
-        wiringValidation,
-        showCircuitDiagnostics: false,
-        viewMode: 'normal',
-        workspaceParts: reconcileChassisElevations(
-          resolveHierarchyWorldTransforms(state.workspaceParts),
-        ),
-        rigidBodyRefs: {},
-        runId: state.runId + 1,
-        simulationStatus: 'playing',
-        challengeStatus: 'in_progress',
-        obstacleHits: 0,
-        simulationStartedAt: Date.now(),
-        completionTimeMs: null,
-        isLevelComplete: false,
-      }));
+      set((state) => {
+        const standingParts = buildAssembledStandingParts(
+          state.assembledPartsSnapshot ?? state.workspaceParts,
+        );
+        return {
+          wiringValidation,
+          showCircuitDiagnostics: false,
+          viewMode: 'normal',
+          assembledPartsSnapshot: cloneWorkspaceParts(standingParts),
+          workspaceParts: standingParts,
+          rigidBodyRefs: state.rigidBodyRefs,
+          simulationRunId: state.simulationRunId + 1,
+          runId: state.runId + 1,
+          simulationStatus: 'playing',
+          challengeStatus: 'in_progress',
+          batteryLevel: currentStatus === 'idle' ? 100 : state.batteryLevel,
+          obstacleHits: 0,
+          simulationStartedAt: Date.now(),
+          completionTimeMs: null,
+          isLevelComplete: false,
+        };
+      });
       return;
     }
     if (status === 'idle' && currentStatus === 'playing') {
@@ -1557,6 +1744,46 @@ export const useSimulationStore = create<SimulationState>()((set, get) => ({
       obstacleHits: nextHits,
       challengeStatus: shouldFail ? 'failed' : state.challengeStatus,
     });
+  },
+
+  updateSensorDistance: (partId, distance) => {
+    const safeDistance = Number.isFinite(distance) && distance >= 0 ? distance : 999;
+    const prevDistance = get().sensorDistances[partId];
+    if (prevDistance !== undefined && Math.abs(prevDistance - safeDistance) < 0.05) {
+      return;
+    }
+    set((state) => ({
+      sensorDistances: {
+        ...state.sensorDistances,
+        [partId]: safeDistance,
+      },
+    }));
+  },
+
+  drainBattery: (amount) => {
+    if (typeof amount !== 'number' || !Number.isFinite(amount) || amount <= 0) {
+      return;
+    }
+    let hitDepletion = false;
+    set((state) => {
+      if (state.batteryLevel <= 0) return state;
+      const nextLevel = Math.max(0, Math.min(100, state.batteryLevel - amount));
+      if (nextLevel <= 0) {
+        hitDepletion = true;
+      }
+      return { batteryLevel: nextLevel };
+    });
+    if (hitDepletion && activeScriptWorker) {
+      try {
+        activeScriptWorker.postMessage({
+          type: 'SENSOR_DATA',
+          sensorDistances: get().sensorDistances,
+          batteryLevel: 0,
+        } satisfies WorkerInboundMessage);
+      } catch {
+        // Ignore transient worker postMessage failure if worker exited.
+      }
+    }
   },
 
   setEmbedConfig: (config) => {
@@ -1645,7 +1872,10 @@ export const useSimulationStore = create<SimulationState>()((set, get) => ({
       isLevelComplete: false,
       servoTargetAngles: {},
       servoAngles: {},
+      sensorDistances: {},
+      batteryLevel: 100,
       rigidBodyRefs: {},
+      assembledPartsSnapshot: null,
       scriptLogs: [],
       scriptError: null,
       resetNonce: state.resetNonce + 1,
@@ -1703,7 +1933,10 @@ export const useSimulationStore = create<SimulationState>()((set, get) => ({
       return {
         servoTargetAngles: zeroServoAngles,
         servoAngles: { ...zeroServoAngles },
+        sensorDistances: {},
+        batteryLevel: 100,
         rigidBodyRefs: {},
+        assembledPartsSnapshot: null,
         workspaceParts: resolvedParts,
         simulationStatus: 'idle',
         challengeStatus: 'idle',
