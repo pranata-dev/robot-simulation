@@ -10,18 +10,21 @@ var workerScope = globalThis;
 
 var HEARTBEAT_INTERVAL_MS = 150;
 var MAX_CONSECUTIVE_UNDELAYED_LOOP_ITERATIONS = 50;
+var MIN_LOOP_FALLBACK_DELAY_MS = 50;
 var MAX_COMMANDS_PER_WINDOW = 250;
 var COMMAND_WINDOW_MS = 1000;
 var MAX_DELAY_MS = 60000;
 var MIN_SERVO_ANGLE_DEG = -60;
 var MAX_SERVO_ANGLE_DEG = 60;
-var DECLARATIVE_LINE_PATTERN = /^(PIN_\\d+|P\\d+|ESP_D\\d+)\\s*:\\s*(-?\\d+(?:\\.\\d+)?)$/i;
+var DECLARATIVE_LINE_PATTERN = /^(PIN_\\d+|P\\d+|ESP_D\\d+|D\\d+|\\d+)\\s*:\\s*(-?\\d+(?:\\.\\d+)?)$/i;
+var OBSTACLE_WAIT_PATTERN = /^WAIT_UNTIL_OBSTACLE_LESS\\s*:\\s*(-?\\d+(?:\\.\\d+)?)$/i;
+var IF_OBSTACLE_PATTERN = /^IF_OBSTACLE_LESS_THAN\\s*:\\s*(-?\\d+(?:\\.\\d+)?)$/i;
 
 function normalizePinOrServoTarget(rawTarget) {
   var trimmed = String(rawTarget).trim();
-  var pinMatch = trimmed.match(/^(?:PIN_|P)(\\d+)$/i);
+  var pinMatch = trimmed.match(/^(PIN_\\d+|P\\d+|ESP_D\\d+|D\\d+|\\d+)$/i);
   if (pinMatch) {
-    return "P" + pinMatch[1];
+    return pinMatch[1].toUpperCase();
   }
   return trimmed;
 }
@@ -29,12 +32,34 @@ function normalizePinOrServoTarget(rawTarget) {
 var activeRunId = 0;
 var activeTimerId = null;
 var heartbeatTimerId = null;
+var activeSleepReject = null;
+var latestSensorDistances = {};
+var latestBatteryLevel = 100;
+
+function assertBatteryRemaining() {
+  if (latestBatteryLevel <= 0) {
+    throw new Error("ERROR: BATTERY DEPLETED");
+  }
+}
+
+function getMinSensorDistanceCm() {
+  var min = Infinity;
+  var keys = Object.keys(latestSensorDistances);
+  for (var i = 0; i < keys.length; i++) {
+    var val = latestSensorDistances[keys[i]];
+    if (typeof val === "number" && Number.isFinite(val) && val < min) {
+      min = val;
+    }
+  }
+  return min;
+}
 
 function clearTimers() {
   if (activeTimerId !== null) {
     workerScope.clearTimeout(activeTimerId);
     activeTimerId = null;
   }
+  activeSleepReject = null;
   if (heartbeatTimerId !== null) {
     workerScope.clearInterval(heartbeatTimerId);
     heartbeatTimerId = null;
@@ -81,10 +106,20 @@ function sleepWithAbort(ms, runId) {
       reject(new Error("__SCRIPT_ABORTED__"));
       return;
     }
+    if (latestBatteryLevel <= 0) {
+      reject(new Error("ERROR: BATTERY DEPLETED"));
+      return;
+    }
+    activeSleepReject = reject;
     activeTimerId = workerScope.setTimeout(function () {
       activeTimerId = null;
+      activeSleepReject = null;
       if (runId !== activeRunId) {
         reject(new Error("__SCRIPT_ABORTED__"));
+        return;
+      }
+      if (latestBatteryLevel <= 0) {
+        reject(new Error("ERROR: BATTERY DEPLETED"));
         return;
       }
       resolve();
@@ -109,25 +144,31 @@ function isDeclarativeScript(script) {
     if (!line) {
       continue;
     }
+    if (/[=(){};]|=>|\\b(const|let|var|function|async|await|for|while|if)\\b/.test(line)) {
+      return false;
+    }
     var upper = line.toUpperCase();
     if (
       upper === "LOOP" ||
-      /^DELAY\\s*:\\s*-?\\d+(?:\\.\\d+)?$/.test(upper) ||
+      upper === "END" ||
+      upper === "ELSE" ||
+      upper === "END_IF" ||
+      /^DELAY\\s*:/i.test(line) ||
+      OBSTACLE_WAIT_PATTERN.test(line) ||
+      IF_OBSTACLE_PATTERN.test(line) ||
       DECLARATIVE_LINE_PATTERN.test(line)
     ) {
       hasDirective = true;
-      continue;
     }
-    return false;
   }
   return hasDirective;
 }
 
-function parseDeclarativeFrames(script) {
+function parseDeclarativeCommands(script) {
   var rawLines = script.split(/\\r?\\n/);
-  var frames = [];
-  var pendingCommands = [];
-  var shouldLoop = false;
+  var commands = [];
+  var ifStack = [];
+  var hasLoop = false;
 
   for (var i = 0; i < rawLines.length; i++) {
     var line = stripDslComment(rawLines[i]);
@@ -135,84 +176,249 @@ function parseDeclarativeFrames(script) {
 
     var upper = line.toUpperCase();
     if (upper === "LOOP") {
-      shouldLoop = true;
+      hasLoop = true;
+      commands.push({ type: "LOOP" });
       continue;
     }
 
-    if (upper.indexOf("DELAY") === 0) {
-      var colonIdx = line.indexOf(":");
-      var ms = colonIdx >= 0 ? Number(line.slice(colonIdx + 1).trim()) : NaN;
-      if (!Number.isFinite(ms) || ms < 0) {
-        throw new Error('Invalid DELAY value in line "' + line + '".');
+    if (upper === "END") {
+      continue;
+    }
+
+    var ifMatch = line.match(IF_OBSTACLE_PATTERN);
+    if (ifMatch) {
+      var ifThresholdCm = Number(ifMatch[1]);
+      if (!Number.isFinite(ifThresholdCm) || ifThresholdCm < 0) {
+        throw new Error("Invalid obstacle distance threshold on line " + (i + 1) + ': "' + line + '".');
       }
-      frames.push({ commands: pendingCommands, delayMs: ms });
-      pendingCommands = [];
+      var ifIndex = commands.length;
+      commands.push({
+        type: "IF_OBSTACLE_LESS_THAN",
+        thresholdCm: ifThresholdCm,
+        falseJumpIndex: -1
+      });
+      ifStack.push({ ifIndex: ifIndex, elseIndex: null, lineNumber: i + 1 });
+      continue;
+    }
+
+    if (upper === "ELSE") {
+      var topFrame = ifStack.length > 0 ? ifStack[ifStack.length - 1] : null;
+      if (!topFrame) {
+        throw new Error("Unexpected ELSE without matching IF_OBSTACLE_LESS_THAN on line " + (i + 1) + ".");
+      }
+      if (topFrame.elseIndex !== null) {
+        throw new Error("Duplicate ELSE on line " + (i + 1) + " for IF block starting on line " + topFrame.lineNumber + ".");
+      }
+      var elseIndex = commands.length;
+      commands.push({ type: "ELSE", endIfIndex: -1 });
+      topFrame.elseIndex = elseIndex;
+      commands[topFrame.ifIndex].falseJumpIndex = elseIndex + 1;
+      continue;
+    }
+
+    if (upper === "END_IF") {
+      var poppedFrame = ifStack.pop();
+      if (!poppedFrame) {
+        throw new Error("Unexpected END_IF without matching IF_OBSTACLE_LESS_THAN on line " + (i + 1) + ".");
+      }
+      var endIfIndex = commands.length;
+      commands.push({ type: "END_IF" });
+      if (poppedFrame.elseIndex !== null) {
+        commands[poppedFrame.elseIndex].endIfIndex = endIfIndex;
+      } else {
+        commands[poppedFrame.ifIndex].falseJumpIndex = endIfIndex + 1;
+      }
+      continue;
+    }
+
+    if (/^DELAY\\s*:/i.test(line)) {
+      var colonIdx = line.indexOf(":");
+      var rawValue = colonIdx >= 0 ? line.slice(colonIdx + 1).trim() : "";
+      var ms = rawValue ? Number(rawValue) : NaN;
+      if (!Number.isFinite(ms) || ms < 0 || ms > MAX_DELAY_MS) {
+        throw new Error("Invalid DELAY value on line " + (i + 1) + ': "' + line + '".');
+      }
+      commands.push({ type: "DELAY", ms: ms });
+      continue;
+    }
+
+    var obstacleMatch = line.match(OBSTACLE_WAIT_PATTERN);
+    if (obstacleMatch) {
+      var thresholdCm = Number(obstacleMatch[1]);
+      if (!Number.isFinite(thresholdCm) || thresholdCm < 0) {
+        throw new Error("Invalid obstacle distance threshold on line " + (i + 1) + ': "' + line + '".');
+      }
+      commands.push({ type: "WAIT_UNTIL_OBSTACLE_LESS", thresholdCm: thresholdCm });
       continue;
     }
 
     var match = line.match(DECLARATIVE_LINE_PATTERN);
     if (match) {
-      var servoTarget = normalizePinOrServoTarget(match[1].toUpperCase());
-      var angleDeg = Math.max(
+      var pin = normalizePinOrServoTarget(match[1].toUpperCase());
+      var parsedAngle = Number(match[2]);
+      if (!Number.isFinite(parsedAngle)) {
+        throw new Error("Invalid servo angle on line " + (i + 1) + ': "' + line + '".');
+      }
+      var angle = Math.max(
         MIN_SERVO_ANGLE_DEG,
-        Math.min(MAX_SERVO_ANGLE_DEG, Number(match[2]))
+        Math.min(MAX_SERVO_ANGLE_DEG, parsedAngle)
       );
-      pendingCommands.push({ servoTarget: servoTarget, angleDeg: angleDeg });
+      commands.push({ type: "PIN", pin: pin, angle: angle });
+      continue;
     }
+
+    throw new Error("Syntax error in DSL script on line " + (i + 1) + ': "' + line + '".');
   }
 
-  if (pendingCommands.length > 0) {
-    frames.push({ commands: pendingCommands, delayMs: null });
+  if (ifStack.length > 0) {
+    var unclosed = ifStack[ifStack.length - 1];
+    throw new Error("Missing END_IF for IF_OBSTACLE_LESS_THAN starting on line " + unclosed.lineNumber + ".");
   }
 
-  return { frames: frames, shouldLoop: shouldLoop };
+  return { commands: commands, hasLoop: hasLoop };
+}
+
+function formatPinStateSummary(pinStates) {
+  var keys = Object.keys(pinStates);
+  var parts = [];
+  for (var i = 0; i < keys.length; i++) {
+    parts.push(keys[i] + ": " + pinStates[keys[i]] + "deg");
+  }
+  return parts.join(", ");
 }
 
 async function runDeclarativeScript(script, runId) {
-  var parsed = parseDeclarativeFrames(script);
-  var frames = parsed.frames;
-  var shouldLoop = parsed.shouldLoop;
-  var iterationsWithoutDelay = 0;
+  var parsed = parseDeclarativeCommands(script);
+  var commands = parsed.commands;
+  var hasLoop = parsed.hasLoop;
+  var currentPinStates = {};
+  var lastBranchOutcomeByPc = {};
+  var lastLoggedSummary = "";
   var isRunning = true;
 
-  while (isRunning && runId === activeRunId) {
-    var delayedThisPass = false;
+  function flushBatch(batch, forceLog) {
+    assertBatteryRemaining();
+    if (batch.length === 0) return;
 
-    for (var i = 0; i < frames.length; i++) {
-      if (!isRunning || runId !== activeRunId) return;
-      var frame = frames[i];
+    workerScope.postMessage({
+      type: "SET_SERVO_BATCH",
+      runId: runId,
+      commands: batch
+    });
 
-      if (frame.commands.length > 0) {
-        workerScope.postMessage({
-          type: "SET_SERVO_BATCH",
-          runId: runId,
-          commands: frame.commands
-        });
-      }
-
-      if (frame.delayMs !== null) {
-        delayedThisPass = true;
-        await sleepWithAbort(frame.delayMs, runId);
-      }
+    for (var j = 0; j < batch.length; j++) {
+      currentPinStates[batch[j].servoTarget] = batch[j].angleDeg;
     }
 
-    if (!shouldLoop) {
+    var summary = formatPinStateSummary(currentPinStates);
+    if (forceLog || summary !== lastLoggedSummary) {
+      lastLoggedSummary = summary;
+      postLog(runId, "info", "Pins -> " + summary);
+    }
+  }
+
+  while (isRunning && runId === activeRunId) {
+    assertBatteryRemaining();
+    var pendingBatch = [];
+    var totalDelayMsThisPass = 0;
+    var pc = 0;
+
+    while (pc < commands.length) {
+      if (!isRunning || runId !== activeRunId) return;
+      assertBatteryRemaining();
+      var cmd = commands[pc];
+
+      if (cmd.type === "PIN") {
+        pendingBatch.push({ servoTarget: cmd.pin, angleDeg: cmd.angle });
+        pc += 1;
+        continue;
+      }
+
+      if (cmd.type === "DELAY") {
+        flushBatch(pendingBatch, cmd.ms > 0);
+        pendingBatch = [];
+        totalDelayMsThisPass += cmd.ms;
+        await sleepWithAbort(cmd.ms, runId);
+        pc += 1;
+        continue;
+      }
+
+      if (cmd.type === "IF_OBSTACLE_LESS_THAN") {
+        flushBatch(pendingBatch, false);
+        pendingBatch = [];
+        var branchMin = getMinSensorDistanceCm();
+        var isTriggered = branchMin < cmd.thresholdCm;
+        if (lastBranchOutcomeByPc[pc] !== isTriggered) {
+          lastBranchOutcomeByPc[pc] = isTriggered;
+          var distLabel = Number.isFinite(branchMin) ? branchMin.toFixed(1) + " cm" : "clear";
+          postLog(
+            runId,
+            "info",
+            isTriggered
+              ? "Obstacle " + distLabel + " < " + cmd.thresholdCm + " cm -> avoiding (IF branch)"
+              : "Path " + distLabel + " >= " + cmd.thresholdCm + " cm -> forward gait (ELSE branch)"
+          );
+        }
+        pc = isTriggered ? pc + 1 : cmd.falseJumpIndex;
+        continue;
+      }
+
+      if (cmd.type === "ELSE") {
+        flushBatch(pendingBatch, false);
+        pendingBatch = [];
+        pc = cmd.endIfIndex + 1;
+        continue;
+      }
+
+      if (cmd.type === "END_IF") {
+        flushBatch(pendingBatch, false);
+        pendingBatch = [];
+        pc += 1;
+        continue;
+      }
+
+      if (cmd.type === "WAIT_UNTIL_OBSTACLE_LESS") {
+        flushBatch(pendingBatch, true);
+        pendingBatch = [];
+        postLog(runId, "info", "Waiting until obstacle < " + cmd.thresholdCm + " cm...");
+        while (isRunning && runId === activeRunId) {
+          assertBatteryRemaining();
+          var currentMin = getMinSensorDistanceCm();
+          if (currentMin < cmd.thresholdCm) {
+            postLog(
+              runId,
+              "info",
+              "Obstacle detected at " +
+                currentMin.toFixed(1) +
+                " cm (< " +
+                cmd.thresholdCm +
+                " cm) — continuing."
+            );
+            break;
+          }
+          totalDelayMsThisPass += MIN_LOOP_FALLBACK_DELAY_MS;
+          await sleepWithAbort(MIN_LOOP_FALLBACK_DELAY_MS, runId);
+        }
+        pc += 1;
+        continue;
+      }
+
+      if (cmd.type === "LOOP") {
+        flushBatch(pendingBatch, false);
+        pendingBatch = [];
+      }
+      pc += 1;
+    }
+
+    flushBatch(pendingBatch, false);
+
+    if (!hasLoop) {
       isRunning = false;
       break;
     }
 
-    if (delayedThisPass) {
-      iterationsWithoutDelay = 0;
-    } else {
-      iterationsWithoutDelay += 1;
-      if (iterationsWithoutDelay >= MAX_CONSECUTIVE_UNDELAYED_LOOP_ITERATIONS) {
-        throw new Error(
-          "Execution quota exceeded: LOOP repeated " +
-            MAX_CONSECUTIVE_UNDELAYED_LOOP_ITERATIONS +
-            " times without DELAY."
-        );
-      }
-      await sleepWithAbort(16, runId);
+    if (totalDelayMsThisPass === 0) {
+      await sleepWithAbort(MIN_LOOP_FALLBACK_DELAY_MS, runId);
     }
   }
 }
@@ -238,8 +444,7 @@ var SHADOWED_GLOBALS = [
   "caches",
   "navigator",
   "location",
-  "Function",
-  "eval"
+  "Function"
 ];
 
 async function runJavaScriptRobotScript(script, runId) {
@@ -251,6 +456,7 @@ async function runJavaScriptRobotScript(script, runId) {
     if (runId !== activeRunId) {
       throw new Error("__SCRIPT_ABORTED__");
     }
+    assertBatteryRemaining();
     var now = Date.now();
     if (now - commandWindowStart >= COMMAND_WINDOW_MS) {
       commandWindowStart = now;
@@ -321,9 +527,11 @@ async function runJavaScriptRobotScript(script, runId) {
     var loopExecution = (async function () {
       var undelayedIterations = 0;
       while (runId === activeRunId) {
+        assertBatteryRemaining();
         delayedSinceLastCheck = false;
         await fn();
         if (runId !== activeRunId) return;
+        assertBatteryRemaining();
 
         if (delayedSinceLastCheck) {
           undelayedIterations = 0;
@@ -344,12 +552,47 @@ async function runJavaScriptRobotScript(script, runId) {
     return loopExecution;
   }
 
-  var ctorArgs = ["setServoAngle", "delay", "loop", "log", "console"]
+  function getUltrasonicDistance() {
+    var min = getMinSensorDistanceCm();
+    return Number.isFinite(min) ? min : 999;
+  }
+
+  async function waitUntilObstacleLess(thresholdCm) {
+    if (typeof thresholdCm !== "number" || !Number.isFinite(thresholdCm) || thresholdCm < 0) {
+      throw new Error("waitUntilObstacleLess(cm) requires a non-negative finite number.");
+    }
+    while (runId === activeRunId) {
+      assertBatteryRemaining();
+      if (getMinSensorDistanceCm() < thresholdCm) {
+        return;
+      }
+      delayedSinceLastCheck = true;
+      await sleepWithAbort(MIN_LOOP_FALLBACK_DELAY_MS, runId);
+    }
+  }
+
+  var ctorArgs = [
+    "setServoAngle",
+    "delay",
+    "loop",
+    "log",
+    "console",
+    "getUltrasonicDistance",
+    "waitUntilObstacleLess"
+  ]
     .concat(SHADOWED_GLOBALS)
     .concat(['"use strict";\\n' + script]);
 
   var runner = AsyncFunctionCtor.apply(null, ctorArgs);
-  var invokeArgs = [setServoAngle, delay, loop, log, sandboxConsole];
+  var invokeArgs = [
+    setServoAngle,
+    delay,
+    loop,
+    log,
+    sandboxConsole,
+    getUltrasonicDistance,
+    waitUntilObstacleLess
+  ];
   for (var s = 0; s < SHADOWED_GLOBALS.length; s++) {
     invokeArgs.push(undefined);
   }
@@ -398,12 +641,39 @@ async function executeScript(runId, script) {
 
 workerScope.onmessage = function (event) {
   var payload = event.data;
+  if (payload.type === "SENSOR_DATA") {
+    latestSensorDistances = payload.sensorDistances || {};
+    if (typeof payload.batteryLevel === "number" && Number.isFinite(payload.batteryLevel)) {
+      latestBatteryLevel = payload.batteryLevel;
+      if (latestBatteryLevel <= 0 && activeSleepReject !== null) {
+        var rejectForBattery = activeSleepReject;
+        activeSleepReject = null;
+        clearTimers();
+        rejectForBattery(new Error("ERROR: BATTERY DEPLETED"));
+      }
+    }
+    return;
+  }
   if (payload.type === "STOP") {
     activeRunId += 1;
+    latestSensorDistances = {};
+    latestBatteryLevel = 100;
+    if (activeSleepReject !== null) {
+      var rejectForStop = activeSleepReject;
+      activeSleepReject = null;
+      clearTimers();
+      rejectForStop(new Error("__SCRIPT_ABORTED__"));
+      return;
+    }
     clearTimers();
     return;
   }
   if (payload.type === "START") {
+    latestSensorDistances = payload.sensorDistances || {};
+    latestBatteryLevel =
+      typeof payload.batteryLevel === "number" && Number.isFinite(payload.batteryLevel)
+        ? payload.batteryLevel
+        : 100;
     executeScript(payload.runId, payload.script);
   }
 };
