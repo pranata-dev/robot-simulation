@@ -9,6 +9,7 @@ export type PartType =
   | 'SERVO_MG90S'
   | 'LEG_COXA'
   | 'LEG_TIBIA'
+  | 'ULTRASONIC_HCSR04'
   | 'OBSTACLE_BLOCK'
   | 'TARGET_ZONE';
 
@@ -21,10 +22,12 @@ export type ViewMode = 'normal' | 'wiring_xray';
 export type ChassisSocketId =
   | 'SOCKET_MCU'
   | 'SOCKET_BAT'
+  | 'socket-battery-mount'
   | 'SOCKET_HIP_FL'
   | 'SOCKET_HIP_FR'
   | 'SOCKET_HIP_BL'
-  | 'SOCKET_HIP_BR';
+  | 'SOCKET_HIP_BR'
+  | 'socket-ultrasonic-front';
 
 export type SubSocketId = 'SOCKET_SERVO_HORN' | 'SOCKET_COXA_DISTAL';
 
@@ -44,7 +47,9 @@ export type Esp32PinId =
 
 export type ServoPinId = 'SERVO_PWM' | 'SERVO_VCC' | 'SERVO_GND';
 
-export type PinId = Esp32PinId | ServoPinId;
+export type UltrasonicPinId = 'US_VCC' | 'US_TRIG' | 'US_ECHO' | 'US_GND';
+
+export type PinId = Esp32PinId | ServoPinId | UltrasonicPinId;
 
 export type PinRole = 'POWER' | 'GROUND' | 'PWM';
 
@@ -177,6 +182,13 @@ export type WorkerInboundMessage =
       type: 'START';
       runId: number;
       script: string;
+      sensorDistances?: Record<string, number>;
+      batteryLevel?: number;
+    }
+  | {
+      type: 'SENSOR_DATA';
+      sensorDistances: Record<string, number>;
+      batteryLevel?: number;
     }
   | {
       type: 'STOP';

@@ -8,6 +8,9 @@ import type {
 
 /** Source of truth: docs/3d_asset_socket_coordinate_map.md (1 unit = 10 cm). */
 
+export const POWER_LIPO_BATTERY_ID = 'power_lipo_battery';
+export const BATTERY_PACK_MASS = 2.5;
+
 export const PART_TYPES: readonly PartType[] = [
   'CHASSIS_BASE',
   'ESP32_DEVKIT',
@@ -15,6 +18,7 @@ export const PART_TYPES: readonly PartType[] = [
   'SERVO_MG90S',
   'LEG_COXA',
   'LEG_TIBIA',
+  'ULTRASONIC_HCSR04',
   'OBSTACLE_BLOCK',
   'TARGET_ZONE',
 ] as const;
@@ -34,9 +38,9 @@ export const PART_CATALOG: Readonly<Record<PartType, PartCatalogEntry>> = {
   },
   BATTERY_2S: {
     type: 'BATTERY_2S',
-    label: 'LiPo Battery 7.4V + BEC 5V',
+    label: 'LiPo Battery Pack',
     dimensions: [0.35, 0.18, 0.7],
-    mass: 0.08,
+    mass: BATTERY_PACK_MASS,
   },
   SERVO_MG90S: {
     type: 'SERVO_MG90S',
@@ -56,6 +60,12 @@ export const PART_CATALOG: Readonly<Record<PartType, PartCatalogEntry>> = {
     dimensions: [0.65, 0.12, 0.12],
     mass: 0.02,
   },
+  ULTRASONIC_HCSR04: {
+    type: 'ULTRASONIC_HCSR04',
+    label: 'Ultrasonic Sensor HC-SR04',
+    dimensions: [0.45, 0.2, 0.15],
+    mass: 0.01,
+  },
   OBSTACLE_BLOCK: {
     type: 'OBSTACLE_BLOCK',
     label: 'Obstacle Block',
@@ -70,13 +80,28 @@ export const PART_CATALOG: Readonly<Record<PartType, PartCatalogEntry>> = {
   },
 };
 
-export const CHASSIS_ASSEMBLY_WORKING_Y = 0.5;
-export const TIBIA_FOOT_TIP: Vector3Tuple = [0.6, -0.15, 0.0];
+/** Servo horn (leg pivot) height above the servo body origin. */
+export const SERVO_HORN_TOP_Y = 0.18;
+/** Local centre of the distal tibia foot sphere, relative to the leg's servo-horn origin. */
+export const TIBIA_FOOT_TIP: Vector3Tuple = [0.0, -0.76, 0.52];
+/** Radius of the rubber foot sphere (mesh and BallCollider share this value). */
+export const TIBIA_FOOT_RADIUS = 0.06;
+/** Gap between the bottom of every foot sphere and the floor (y = 0) in assembly mode. */
+export const FOOT_GROUND_CLEARANCE = 0.03;
+
+/**
+ * Chassis centre height that rests all four foot-sphere bottoms at y = FOOT_GROUND_CLEARANCE:
+ * chassisY + hornY + footTipY - footRadius = clearance  ->  0.03 + 0.06 + 0.76 - 0.18 = 0.67.
+ */
+export const CHASSIS_ASSEMBLY_WORKING_Y =
+  FOOT_GROUND_CLEARANCE + TIBIA_FOOT_RADIUS - TIBIA_FOOT_TIP[1] - SERVO_HORN_TOP_Y;
 
 const PIN_RED = '#ef4444';
 const PIN_SLATE = '#475569';
 const PIN_YELLOW = '#eab308';
 const PIN_AMBER = '#f59e0b';
+const PIN_SKY = '#38bdf8';
+const PIN_GREEN = '#22c55e';
 const WIRE_GROUND_COLOR = '#334155';
 
 export const ESP32_PINS: readonly PinDefinition[] = [
@@ -99,6 +124,14 @@ export const SERVO_PINS: readonly PinDefinition[] = [
   { id: 'SERVO_GND', hostPartType: 'SERVO_MG90S', label: 'GND', role: 'GROUND', position: [0.08, 0.125, -0.105], color: PIN_SLATE, gpio: null },
 ];
 
+/** 4-pin header on the top rear edge of the HC-SR04 ultrasonic rangefinder module. */
+export const ULTRASONIC_PINS: readonly PinDefinition[] = [
+  { id: 'US_VCC', hostPartType: 'ULTRASONIC_HCSR04', label: 'VCC', role: 'POWER', position: [-0.09, 0.14, -0.055], color: PIN_RED, gpio: null },
+  { id: 'US_TRIG', hostPartType: 'ULTRASONIC_HCSR04', label: 'TRIG', role: 'PWM', position: [-0.03, 0.14, -0.055], color: PIN_SKY, gpio: null },
+  { id: 'US_ECHO', hostPartType: 'ULTRASONIC_HCSR04', label: 'ECHO', role: 'PWM', position: [0.03, 0.14, -0.055], color: PIN_GREEN, gpio: null },
+  { id: 'US_GND', hostPartType: 'ULTRASONIC_HCSR04', label: 'GND', role: 'GROUND', position: [0.09, 0.14, -0.055], color: PIN_SLATE, gpio: null },
+];
+
 export const PINS_BY_PART: Readonly<Record<PartType, readonly PinDefinition[]>> = {
   CHASSIS_BASE: [],
   ESP32_DEVKIT: ESP32_PINS,
@@ -106,6 +139,7 @@ export const PINS_BY_PART: Readonly<Record<PartType, readonly PinDefinition[]>> 
   SERVO_MG90S: SERVO_PINS,
   LEG_COXA: [],
   LEG_TIBIA: [],
+  ULTRASONIC_HCSR04: ULTRASONIC_PINS,
   OBSTACLE_BLOCK: [],
   TARGET_ZONE: [],
 };

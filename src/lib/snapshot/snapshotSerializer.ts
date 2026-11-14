@@ -23,8 +23,10 @@ export type ParsedSnapshotResult =
 const IMPLEMENTED_PART_TYPES = new Set<PartType>([
   'CHASSIS_BASE',
   'ESP32_DEVKIT',
+  'BATTERY_2S',
   'SERVO_MG90S',
   'LEG_TIBIA',
+  'ULTRASONIC_HCSR04',
   'OBSTACLE_BLOCK',
   'TARGET_ZONE',
 ]);

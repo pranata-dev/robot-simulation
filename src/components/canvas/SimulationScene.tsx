@@ -3,10 +3,12 @@
 import { Suspense, useEffect, useRef } from 'react';
 import { Canvas } from '@react-three/fiber';
 import { ContactShadows, Environment, OrbitControls } from '@react-three/drei';
-import { CuboidCollider, Physics, RigidBody } from '@react-three/rapier';
+import { CuboidCollider, interactionGroups, Physics, RigidBody } from '@react-three/rapier';
 import type * as THREE from 'three';
 import ChassisBase from '@/components/canvas/parts/robots/spider/ChassisBase';
 import SpiderLegProxy from '@/components/canvas/parts/robots/spider/SpiderLegProxy';
+import BatteryPackProxy from '@/components/canvas/parts/power/BatteryPackProxy';
+import UltrasonicSensorProxy from '@/components/canvas/parts/sensors/UltrasonicSensorProxy';
 import ESP32Proxy from '@/components/canvas/parts/shared/ESP32Proxy';
 import ObstacleProxy from '@/components/canvas/parts/shared/ObstacleProxy';
 import ServoProxy from '@/components/canvas/parts/shared/ServoProxy';
@@ -18,7 +20,6 @@ import PhysicsInspectorOverlay from '@/components/canvas/PhysicsInspectorOverlay
 import WiringSystem from '@/components/canvas/WiringSystem';
 import { useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts';
 import { clearPhysicsRegistry } from '@/lib/physics/rigidBodyRegistry';
-import { ENV_COLLISION_GROUPS } from '@/lib/physics/servoMotorControl';
 import { disposeSceneResources } from '@/lib/three/disposeSceneResources';
 import { useSimulationStore } from '@/store/useSimulationStore';
 import type { ThemeMode, Vector3Tuple } from '@/types/simulator';
@@ -26,8 +27,6 @@ import type { ThemeMode, Vector3Tuple } from '@/types/simulator';
 const CAMERA_POSITION: Vector3Tuple = [5, 5, 5];
 const GRAVITY: Vector3Tuple = [0, -9.81, 0];
 const FLOOR_SIZE = 20;
-const FLOOR_HALF = FLOOR_SIZE / 2;
-const FLOOR_THICKNESS_HALF = 0.05;
 const SHADOW_EXTENT = 6;
 
 function WorkspaceParts() {
@@ -76,6 +75,16 @@ function WorkspaceParts() {
                 attachedTo={part.attachedTo}
               />
             );
+          case 'ULTRASONIC_HCSR04':
+            return (
+              <UltrasonicSensorProxy
+                key={part.id}
+                id={part.id}
+                position={part.position}
+                rotation={part.rotation}
+                attachedTo={part.attachedTo}
+              />
+            );
           case 'OBSTACLE_BLOCK':
             return (
               <ObstacleProxy
@@ -95,6 +104,15 @@ function WorkspaceParts() {
               />
             );
           case 'BATTERY_2S':
+            return (
+              <BatteryPackProxy
+                key={part.id}
+                id={part.id}
+                position={part.position}
+                rotation={part.rotation}
+                attachedTo={part.attachedTo}
+              />
+            );
           case 'LEG_COXA':
             return null;
           default: {
@@ -107,17 +125,20 @@ function WorkspaceParts() {
   );
 }
 
+const FLOOR_COLLISION_GROUPS = interactionGroups(0, [0, 1]);
+
 function Floor({ theme }: { theme: ThemeMode }) {
   return (
     <RigidBody
       type="fixed" colliders={false} name="FLOOR" position={[0, 0, 0]}
-      friction={1.5} restitution={0}
-      collisionGroups={ENV_COLLISION_GROUPS} solverGroups={ENV_COLLISION_GROUPS}
+      friction={1.2} restitution={0}
+      collisionGroups={FLOOR_COLLISION_GROUPS} solverGroups={FLOOR_COLLISION_GROUPS}
+      userData={{ isFloor: true }}
     >
       <CuboidCollider
-        args={[FLOOR_HALF, FLOOR_THICKNESS_HALF, FLOOR_HALF]} position={[0, -FLOOR_THICKNESS_HALF, 0]}
-        friction={1.5} restitution={0}
-        collisionGroups={ENV_COLLISION_GROUPS} solverGroups={ENV_COLLISION_GROUPS}
+        args={[50, 0.5, 50]} position={[0, -0.5, 0]}
+        friction={1.2} restitution={0}
+        collisionGroups={FLOOR_COLLISION_GROUPS} solverGroups={FLOOR_COLLISION_GROUPS}
       />
       <mesh rotation={[-Math.PI / 2, 0, 0]} receiveShadow>
         <planeGeometry args={[FLOOR_SIZE, FLOOR_SIZE]} />
@@ -129,7 +150,6 @@ function Floor({ theme }: { theme: ThemeMode }) {
 
 function Lights({ theme, shadowsEnabled }: { theme: ThemeMode; shadowsEnabled: boolean }) {
   const isDark = theme === 'dark';
-
   return (
     <>
       <ambientLight intensity={isDark ? 0.35 : 0.65} />
@@ -150,12 +170,20 @@ function Lights({ theme, shadowsEnabled }: { theme: ThemeMode; shadowsEnabled: b
     </>
   );
 }
+function ActiveJointSystem() {
+  const isPlaying = useSimulationStore((s) => s.simulationStatus === 'playing');
+  const simulationRunId = useSimulationStore((s) => s.simulationRunId);
+  const parts = useSimulationStore((s) => s.workspaceParts);
+  const refs = useSimulationStore((s) => s.rigidBodyRefs);
+  if (!isPlaying) return null;
+  const ready = parts.every((p) => !p.attachedTo || Boolean(refs[p.id]?.current && refs[p.attachedTo]?.current));
+  return ready ? <JointSystem key={`joints-${simulationRunId}`} /> : null;
+}
 
 export default function SimulationScene() {
   useKeyboardShortcuts();
   const simulationStatus = useSimulationStore((state) => state.simulationStatus);
   const isPhysicsPaused = simulationStatus !== 'playing';
-  const runId = useSimulationStore((state) => state.runId);
   const resetNonce = useSimulationStore((state) => state.resetNonce);
   const theme = useSimulationStore((state) => state.theme);
   const performanceMode = useSimulationStore((state) => state.performanceMode);
@@ -216,12 +244,10 @@ export default function SimulationScene() {
 
         <Suspense fallback={null}>
           <Environment preset="city" environmentIntensity={isDark ? 0.45 : 0.85} />
-          <Physics gravity={GRAVITY} paused={isPhysicsPaused}>
+          <Physics gravity={GRAVITY} paused={isPhysicsPaused} numSolverIterations={16}>
             <Floor theme={theme} />
-            <group key={`sim-${runId}-${resetNonce}-${simulationStatus}`}>
-              <WorkspaceParts />
-              <JointSystem />
-            </group>
+            <WorkspaceParts key={resetNonce} />
+            <ActiveJointSystem />
           </Physics>
         </Suspense>
 

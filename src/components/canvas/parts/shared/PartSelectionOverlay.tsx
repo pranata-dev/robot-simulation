@@ -20,6 +20,7 @@ const SELECTION_BOUNDS_BY_PART: Readonly<Record<PartType, PartSelectionBounds>> 
   SERVO_MG90S: { center: [0, 0.02, -0.01], size: [0.36, 0.36, 0.28] },
   LEG_COXA: { center: [0.12, 0, 0], size: [0.34, 0.19, 0.24] },
   LEG_TIBIA: { center: [0, -0.17, 0.25], size: [0.14, 0.48, 0.64] },
+  ULTRASONIC_HCSR04: { center: [0, 0.02, 0.01], size: [0.49, 0.28, 0.22] },
   OBSTACLE_BLOCK: { center: [0, 0, 0], size: [0.84, 0.39, 0.54] },
   TARGET_ZONE: { center: [0, 0.22, 0], size: [1.84, 0.48, 1.24] },
 };

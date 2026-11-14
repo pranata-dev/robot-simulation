@@ -1,6 +1,9 @@
 import {
   CHASSIS_ASSEMBLY_WORKING_Y,
   PART_CATALOG,
+  SERVO_HORN_TOP_Y,
+  TIBIA_FOOT_RADIUS,
+  TIBIA_FOOT_TIP,
 } from '@/lib/constants/hardwareCatalog';
 import { buildSpiderPresets } from '@/lib/snapshot/presets';
 import type {
@@ -22,19 +25,27 @@ function normalizeAxis(x: number, y: number, z: number): Vector3Tuple {
   return [x / len, y / len, z / len];
 }
 
+export const SPIDER_SERVO_HORN_OFFSET: Vector3Tuple = [0.0, SERVO_HORN_TOP_Y, 0.0];
+export const SPIDER_LEG_HINGE_OFFSET: Vector3Tuple = [0.0, 0.0, 0.0];
+export const SPIDER_FOOT_TIP_LOCAL: Vector3Tuple = TIBIA_FOOT_TIP;
+export const SPIDER_FOOT_RADIUS = TIBIA_FOOT_RADIUS;
+/** 0.67: foot-sphere bottoms rest at y = 0.03 above the grid in assembly mode. */
+export const SPIDER_CHASSIS_WORKING_Y = CHASSIS_ASSEMBLY_WORKING_Y;
+export const SPIDER_BATTERY_MOUNT_OFFSET: Vector3Tuple = [0.0, 0.165, -0.35];
+
+const INCLINED_COS_35 = 0.82;
+const INCLINED_SIN_35 = 0.57;
+
 /**
- * Compound revolute axis for 4-servo single-DOF corner hip servos.
- * Primary Y-axis [0, 1, 0] tilted ~18 deg outward/pitch ([±0.3, ±1, ±0.3] normalized):
- * - Left corners (FL, BL): [-0.3, 1, 0.3] normalized -> +angle swings leg forward (+Z) AND lifts foot (+Y);
- *   -angle sweeps leg backward (-Z) AND presses foot down (-Y) into the floor for traction.
- * - Right corners (FR, BR): [-0.3, -1, -0.3] normalized -> +angle swings leg forward (+Z) AND lifts foot (+Y);
- *   -angle sweeps leg backward (-Z) AND presses foot down (-Y) into the floor for traction.
+ * 35-degree inclined 1-DOF revolute axes (`normalize([±0.57, ±0.82, 0])` oriented per corner socket)
+ * so single-servo hip actuation produces simultaneous vertical step clearance / push-up lift
+ * and forward trot sweep without tucking or jamming against the floor.
  */
 export const SPIDER_HIP_REVOLUTE_AXES: Readonly<Partial<Record<SocketDefinition['id'], Vector3Tuple>>> = {
-  SOCKET_HIP_FL: normalizeAxis(-0.3, 1, 0.3),
-  SOCKET_HIP_BL: normalizeAxis(-0.3, 1, 0.3),
-  SOCKET_HIP_FR: normalizeAxis(-0.3, -1, -0.3),
-  SOCKET_HIP_BR: normalizeAxis(-0.3, -1, -0.3),
+  SOCKET_HIP_FL: normalizeAxis(-INCLINED_SIN_35, INCLINED_COS_35, 0),
+  SOCKET_HIP_FR: normalizeAxis(-INCLINED_SIN_35, -INCLINED_COS_35, 0),
+  SOCKET_HIP_BL: normalizeAxis(INCLINED_SIN_35, INCLINED_COS_35, 0),
+  SOCKET_HIP_BR: normalizeAxis(INCLINED_SIN_35, -INCLINED_COS_35, 0),
 };
 
 export const SPIDER_CHASSIS_DIMENSIONS: Vector3Tuple = PART_CATALOG.CHASSIS_BASE.dimensions;
@@ -55,6 +66,7 @@ export const SPIDER_BILL_OF_MATERIALS: Readonly<Record<PartType, number>> = {
   SERVO_MG90S: 8,
   LEG_COXA: 4,
   LEG_TIBIA: 4,
+  ULTRASONIC_HCSR04: 1,
   OBSTACLE_BLOCK: 99,
   TARGET_ZONE: 99,
 };
@@ -70,10 +82,10 @@ export const SPIDER_CHASSIS_SOCKETS: readonly SocketDefinition[] = [
     jointAxis: null,
   },
   {
-    id: 'SOCKET_BAT',
+    id: 'socket-battery-mount',
     hostPartType: 'CHASSIS_BASE',
     allowedTypes: ['BATTERY_2S'],
-    position: [0.0, 0.16, -0.35],
+    position: SPIDER_BATTERY_MOUNT_OFFSET,
     rotation: [0, 0, 0],
     jointKind: 'FIXED',
     jointAxis: null,
@@ -114,6 +126,15 @@ export const SPIDER_CHASSIS_SOCKETS: readonly SocketDefinition[] = [
     jointKind: 'REVOLUTE',
     jointAxis: AXIS_Y,
   },
+  {
+    id: 'socket-ultrasonic-front',
+    hostPartType: 'CHASSIS_BASE',
+    allowedTypes: ['ULTRASONIC_HCSR04'],
+    position: [0.0, 0.02, 0.88],
+    rotation: [0, 0, 0],
+    jointKind: 'FIXED',
+    jointAxis: null,
+  },
 ];
 
 export const SPIDER_SERVO_SOCKETS: readonly SocketDefinition[] = [
@@ -121,7 +142,7 @@ export const SPIDER_SERVO_SOCKETS: readonly SocketDefinition[] = [
     id: 'SOCKET_SERVO_HORN',
     hostPartType: 'SERVO_MG90S',
     allowedTypes: ['LEG_TIBIA'],
-    position: [0.0, 0.18, 0.0],
+    position: SPIDER_SERVO_HORN_OFFSET,
     rotation: [0, 0, 0],
     jointKind: 'REVOLUTE',
     jointAxis: AXIS_Y,
@@ -147,6 +168,7 @@ export const SPIDER_SOCKETS_BY_PART: Readonly<Record<PartType, readonly SocketDe
   SERVO_MG90S: SPIDER_SERVO_SOCKETS,
   LEG_COXA: SPIDER_COXA_SOCKETS,
   LEG_TIBIA: [],
+  ULTRASONIC_HCSR04: [],
   OBSTACLE_BLOCK: [],
   TARGET_ZONE: [],
 };
@@ -154,14 +176,14 @@ export const SPIDER_SOCKETS_BY_PART: Readonly<Record<PartType, readonly SocketDe
 export const SPIDER_PRESETS = buildSpiderPresets(
   SPIDER_SOCKETS_BY_PART,
   SPIDER_CHASSIS_HALF_HEIGHT,
-  CHASSIS_ASSEMBLY_WORKING_Y,
+  SPIDER_CHASSIS_WORKING_Y,
 );
 
 export const SPIDER_BLUEPRINT: RobotBlueprintConfig = {
   id: 'spider',
   name: 'Quadruped Spider (4-Leg / 8-DOF)',
   chassisDimensions: SPIDER_CHASSIS_DIMENSIONS,
-  chassisAssemblyWorkingY: CHASSIS_ASSEMBLY_WORKING_Y,
+  chassisAssemblyWorkingY: SPIDER_CHASSIS_WORKING_Y,
   sockets: SPIDER_SOCKETS_BY_PART,
   defaultInventoryCounts: SPIDER_BILL_OF_MATERIALS,
   presets: SPIDER_PRESETS,

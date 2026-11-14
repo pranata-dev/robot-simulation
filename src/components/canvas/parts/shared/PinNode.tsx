@@ -31,6 +31,10 @@ const ESP_PIN_SHORT_LABELS: Partial<Record<PinId, string>> = {
   ESP_D25: 'P6 · PWM',
   ESP_D33: 'P7 · PWM',
   ESP_D32: 'P8 · PWM',
+  US_VCC: 'VCC · 5V',
+  US_TRIG: 'TRIG · PWM',
+  US_ECHO: 'ECHO · PWM',
+  US_GND: 'GND',
 };
 
 function getHoverLabel(pin: PinDefinition): string {

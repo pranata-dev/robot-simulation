@@ -1,4 +1,9 @@
-import { PART_CATALOG, getWireColorForPinRole } from '@/lib/constants/hardwareCatalog';
+import {
+  PART_CATALOG,
+  POWER_LIPO_BATTERY_ID,
+  getWireColorForPinRole,
+} from '@/lib/constants/hardwareCatalog';
+import { computeFootClearanceLift } from '@/lib/physics/footClearance';
 import {
   type BuiltInPreset,
   type PartType,
@@ -13,6 +18,8 @@ import { resolveHierarchyWithSockets } from '@/utils/transformMath';
 
 const CHASSIS_ID = 'preset-chassis-base';
 const ESP32_ID = 'preset-esp32-devkit';
+const ULTRASONIC_ID = 'preset-ultrasonic-hcsr04';
+const OBSTACLE_ID = 'preset-obstacle-block';
 
 interface LegAssemblySpec {
   servoId: string;
@@ -44,51 +51,104 @@ const UNWIRED_SPIDER_SCRIPT = [
   'LOOP',
 ].join('\n');
 
-const WALKING_GAIT_SCRIPT = [
-  '# Quadruped Alternating Diagonal Trot Gait (FL=P1, FR=P2, BL=P3, BR=P4)',
-  '# Normalized axis convention: +deg = leg swings forward, -deg = leg pushes backward',
-  'PIN_2: 45',
-  'PIN_3: 45',
-  'PIN_1: -45',
-  'PIN_4: -45',
-  'DELAY: 600',
-  'PIN_2: -45',
-  'PIN_3: -45',
-  'PIN_1: 45',
-  'PIN_4: 45',
-  'DELAY: 600',
+const AUTONOMOUS_AVOIDANCE_SCRIPT = [
+  '# Autonomous Obstacle Avoidance + Alternating Trot Gait',
+  '# FL=PIN_1, FR=PIN_2, BL=PIN_3, BR=PIN_4 | Front HC-SR04 Trig=PIN_5, Echo=PIN_6',
   'LOOP',
+  'IF_OBSTACLE_LESS_THAN: 15',
+  '  # --- OBSTACLE AVOIDANCE (TURN RIGHT) ---',
+  '  # Swing left legs (FL/BL) forward while right legs (FR/BR) hold planted',
+  '  PIN_1: 45',
+  '  PIN_3: 45',
+  '  PIN_2: 0',
+  '  PIN_4: 0',
+  '  DELAY: 400',
+  '  # Drive left legs (FL/BL) backward to pivot chassis right around obstacle',
+  '  PIN_1: -45',
+  '  PIN_3: -45',
+  '  PIN_2: 0',
+  '  PIN_4: 0',
+  '  DELAY: 400',
+  '  # Second pivot stroke to clear obstacle width cleanly',
+  '  PIN_1: 45',
+  '  PIN_3: 45',
+  '  PIN_2: 0',
+  '  PIN_4: 0',
+  '  DELAY: 400',
+  '  PIN_1: -45',
+  '  PIN_3: -45',
+  '  PIN_2: 0',
+  '  PIN_4: 0',
+  '  DELAY: 400',
+  'ELSE',
+  '  # --- NORMAL WALK FORWARD (TROT GAIT) ---',
+  '  # Diagonal Pair 1 Forward (FL+BR), Pair 2 Backward (FR+BL)',
+  '  PIN_1: 45',
+  '  PIN_4: 45',
+  '  PIN_2: -45',
+  '  PIN_3: -45',
+  '  DELAY: 500',
+  '  # Diagonal Pair 1 Backward (FL+BR), Pair 2 Forward (FR+BL)',
+  '  PIN_1: -45',
+  '  PIN_4: -45',
+  '  PIN_2: 45',
+  '  PIN_3: 45',
+  '  DELAY: 500',
+  'END_IF',
 ].join('\n');
 
 function buildFullSpiderParts(
   socketsByPart: Readonly<Record<PartType, readonly SocketDefinition[]>>,
   chassisWorkingY: number,
+  options: { includeBattery?: boolean } = {},
 ): WorkspacePart[] {
+  const standingY = chassisWorkingY;
   const seedParts: WorkspacePart[] = [
     {
       id: CHASSIS_ID,
       type: 'CHASSIS_BASE',
       label: PART_CATALOG.CHASSIS_BASE.label,
-      position: [0, chassisWorkingY, 0],
+      position: [0, standingY, 0],
       rotation: [0, 0, 0],
     },
     {
       id: ESP32_ID,
       type: 'ESP32_DEVKIT',
       label: PART_CATALOG.ESP32_DEVKIT.label,
-      position: [0, chassisWorkingY, 0],
+      position: [0, standingY, 0],
       rotation: [0, 0, 0],
       attachedTo: CHASSIS_ID,
       socketId: 'SOCKET_MCU',
     },
+    {
+      id: ULTRASONIC_ID,
+      type: 'ULTRASONIC_HCSR04',
+      label: PART_CATALOG.ULTRASONIC_HCSR04.label,
+      position: [0, standingY, 0],
+      rotation: [0, 0, 0],
+      attachedTo: CHASSIS_ID,
+      socketId: 'socket-ultrasonic-front',
+    },
   ];
+
+  if (options.includeBattery) {
+    seedParts.push({
+      id: POWER_LIPO_BATTERY_ID,
+      type: 'BATTERY_2S',
+      label: PART_CATALOG.BATTERY_2S.label,
+      position: [0, standingY, 0],
+      rotation: [0, 0, 0],
+      attachedTo: CHASSIS_ID,
+      socketId: 'socket-battery-mount',
+    });
+  }
 
   for (const spec of QUADRUPED_LEG_SPECS) {
     seedParts.push({
       id: spec.servoId,
       type: 'SERVO_MG90S',
       label: PART_CATALOG.SERVO_MG90S.label,
-      position: [0, chassisWorkingY, 0],
+      position: [0, standingY, 0],
       rotation: [0, 0, 0],
       attachedTo: CHASSIS_ID,
       socketId: spec.socketId,
@@ -97,14 +157,21 @@ function buildFullSpiderParts(
       id: spec.legId,
       type: 'LEG_TIBIA',
       label: PART_CATALOG.LEG_TIBIA.label,
-      position: [0, chassisWorkingY, 0],
+      position: [0, standingY, 0],
       rotation: [0, 0, 0],
       attachedTo: spec.servoId,
       socketId: 'SOCKET_SERVO_HORN',
     });
   }
 
-  return resolveHierarchyWithSockets(seedParts, socketsByPart, new Set([CHASSIS_ID]));
+  const resolvedParts = resolveHierarchyWithSockets(seedParts, socketsByPart, new Set([CHASSIS_ID]));
+  // Guard: never let a resolved foot sphere start below the grid (y < FOOT_GROUND_CLEARANCE).
+  const lift = computeFootClearanceLift(resolvedParts);
+  if (lift === 0) return resolvedParts;
+  return resolvedParts.map((part) => ({
+    ...part,
+    position: [part.position[0], part.position[1] + lift, part.position[2]],
+  }));
 }
 
 function buildFullSpiderWires(): WireConnection[] {
@@ -141,6 +208,40 @@ function buildFullSpiderWires(): WireConnection[] {
       },
     );
   }
+  wires.push(
+    {
+      id: `wire-vcc-${ULTRASONIC_ID}`,
+      fromPartId: ESP32_ID,
+      fromPinId: 'ESP_VIN',
+      toPartId: ULTRASONIC_ID,
+      toPinId: 'US_VCC',
+      color: powerColor,
+    },
+    {
+      id: `wire-gnd-${ULTRASONIC_ID}`,
+      fromPartId: ESP32_ID,
+      fromPinId: 'ESP_GND',
+      toPartId: ULTRASONIC_ID,
+      toPinId: 'US_GND',
+      color: groundColor,
+    },
+    {
+      id: `wire-trig-${ULTRASONIC_ID}`,
+      fromPartId: ESP32_ID,
+      fromPinId: 'ESP_D26',
+      toPartId: ULTRASONIC_ID,
+      toPinId: 'US_TRIG',
+      color: pwmColor,
+    },
+    {
+      id: `wire-echo-${ULTRASONIC_ID}`,
+      fromPartId: ESP32_ID,
+      fromPinId: 'ESP_D25',
+      toPartId: ULTRASONIC_ID,
+      toPinId: 'US_ECHO',
+      color: pwmColor,
+    },
+  );
   return wires;
 }
 
@@ -186,12 +287,22 @@ export function buildSpiderPresets(
     {
       id: 'ready-to-walk',
       name: 'Ready-to-Walk Spider',
-      description: 'Complete spider with valid 3-pin wiring and alternating trot gait script.',
+      description:
+        'Complete spider wired with HC-SR04 ultrasonic sensor, LiPo battery pack, forward obstacle block, and autonomous obstacle-avoidance script.',
       snapshot: {
         schemaVersion: SIMULATION_SCHEMA_VERSION,
-        workspaceParts: buildFullSpiderParts(socketsByPart, chassisWorkingY),
+        workspaceParts: [
+          ...buildFullSpiderParts(socketsByPart, chassisWorkingY, { includeBattery: true }),
+          {
+            id: OBSTACLE_ID,
+            type: 'OBSTACLE_BLOCK',
+            label: PART_CATALOG.OBSTACLE_BLOCK.label,
+            position: [0, PART_CATALOG.OBSTACLE_BLOCK.dimensions[1] / 2, 3.5],
+            rotation: [0, 0, 0],
+          },
+        ],
         wires: buildFullSpiderWires(),
-        script: WALKING_GAIT_SCRIPT,
+        script: AUTONOMOUS_AVOIDANCE_SCRIPT,
         wiringMode: '3-pin',
       },
     },
