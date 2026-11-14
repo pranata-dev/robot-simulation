@@ -187,13 +187,15 @@ function RevoluteMotorJoint({
     currentAngleRadRef.current = nextAngleRad;
 
     const targetRad = initialAngleRad + THREE.MathUtils.degToRad(targetDeg);
+    const currentRad = physicalAngleRad ?? nextAngleRad;
+    const work = Math.min(Math.abs(targetRad - currentRad), 0.5);
     const hasCommandedMotion =
       Math.abs(targetRad - nextAngleRad) > 1e-3 ||
       Math.abs(nextAngleRad - prevAngleRad) > 1e-4 ||
       (physicalAngleRad !== null && Math.abs(targetRad - physicalAngleRad) > 0.02);
 
-    if (hasCommandedMotion && clampedDelta > 0 && storeState.powerDrainRate > 0) {
-      storeState.drainBattery(storeState.powerDrainRate * clampedDelta);
+    if (hasCommandedMotion && work > 0 && clampedDelta > 0 && storeState.powerDrainRate > 0) {
+      storeState.drainBattery(work * storeState.powerDrainRate * clampedDelta);
     }
   });
 

@@ -521,7 +521,7 @@ function createInitialData(blueprintId: RobotBlueprintId = 'spider'): Simulation
     servoAngles: {},
     sensorDistances: {},
     batteryLevel: 100,
-    powerDrainRate: 0.5,
+    powerDrainRate: 0.05,
     rigidBodyRefs: {},
     assembledPartsSnapshot: null,
     simulationRunId: 0,
