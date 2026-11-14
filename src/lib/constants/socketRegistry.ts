@@ -23,6 +23,7 @@ import {
   SPIDER_SOCKETS_BY_PART,
 } from '@/lib/blueprints/spiderBlueprint';
 import {
+  BATTERY_PINS,
   CHASSIS_ASSEMBLY_WORKING_Y,
   ESP32_PINS,
   PART_CATALOG,
@@ -30,6 +31,7 @@ import {
   PINS_BY_PART,
   SERVO_PINS,
   TIBIA_FOOT_TIP,
+  ULTRASONIC_PINS,
   findPinDefinition,
   getWireColorForPinRole,
 } from '@/lib/constants/hardwareCatalog';
@@ -44,6 +46,7 @@ import type {
 
 export {
   ALL_ROBOT_BLUEPRINTS,
+  BATTERY_PINS,
   CHASSIS_ASSEMBLY_WORKING_Y,
   ESP32_PINS,
   PART_CATALOG,
@@ -60,6 +63,7 @@ export {
   SPIDER_LEG_HINGE_OFFSET,
   SPIDER_SERVO_HORN_OFFSET,
   TIBIA_FOOT_TIP,
+  ULTRASONIC_PINS,
   findPinDefinition,
   getWireColorForPinRole,
 };

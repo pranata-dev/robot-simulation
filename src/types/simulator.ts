@@ -49,7 +49,9 @@ export type ServoPinId = 'SERVO_PWM' | 'SERVO_VCC' | 'SERVO_GND';
 
 export type UltrasonicPinId = 'US_VCC' | 'US_TRIG' | 'US_ECHO' | 'US_GND';
 
-export type PinId = Esp32PinId | ServoPinId | UltrasonicPinId;
+export type BatteryPinId = 'VCC_OUT' | 'GND_OUT';
+
+export type PinId = Esp32PinId | ServoPinId | UltrasonicPinId | BatteryPinId;
 
 export type PinRole = 'POWER' | 'GROUND' | 'PWM';
 
@@ -62,6 +64,8 @@ export interface PartCatalogEntry {
   dimensions: Vector3Tuple;
   /** Mass in kg. */
   mass: number;
+  /** Pin identifiers exposed by this part, if interactive. */
+  pins?: readonly PinId[];
 }
 
 export interface SocketDefinition {

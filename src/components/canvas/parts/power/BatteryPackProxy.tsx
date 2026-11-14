@@ -4,7 +4,8 @@ import { memo, useEffect, useRef } from 'react';
 import { Text } from '@react-three/drei';
 import type { RapierRigidBody } from '@react-three/rapier';
 import DraggableRigidPart from '@/components/canvas/parts/shared/DraggableRigidPart';
-import { PART_CATALOG } from '@/lib/constants/socketRegistry';
+import PinNode from '@/components/canvas/parts/shared/PinNode';
+import { BATTERY_PINS, PART_CATALOG } from '@/lib/constants/socketRegistry';
 import { ROBOT_COLLISION_GROUPS } from '@/lib/physics/servoMotorControl';
 import { useSimulationStore } from '@/store/useSimulationStore';
 import type { Vector3Tuple } from '@/types/simulator';
@@ -76,14 +77,19 @@ function BatteryPackProxy({ id, position, rotation, attachedTo }: BatteryPackPro
         <boxGeometry args={[0.08, 0.05, 0.044]} />
         <meshStandardMaterial color="#eab308" roughness={0.35} metalness={0.1} />
       </mesh>
-      <mesh position={[0.04, HEIGHT * 0.15, DEPTH / 2 + 0.05]} castShadow>
+      <mesh position={[0.035, HEIGHT * 0.15, DEPTH / 2 + 0.05]} castShadow>
         <boxGeometry args={[0.018, 0.018, 0.03]} />
         <meshStandardMaterial color="#ef4444" roughness={0.4} />
       </mesh>
-      <mesh position={[0.08, HEIGHT * 0.15, DEPTH / 2 + 0.05]} castShadow>
+      <mesh position={[0.085, HEIGHT * 0.15, DEPTH / 2 + 0.05]} castShadow>
         <boxGeometry args={[0.018, 0.018, 0.03]} />
         <meshStandardMaterial color="#111827" roughness={0.4} />
       </mesh>
+
+      {/* Interactive XT60 VCC_OUT (+) and GND_OUT (-) power output pins */}
+      {BATTERY_PINS.map((pin) => (
+        <PinNode key={pin.id} partId={id} pin={pin} radius={0.022} />
+      ))}
 
       {/* White JST-XH 3-pin balance lead */}
       <mesh position={[-0.08, HEIGHT * 0.15, DEPTH / 2 + 0.018]} castShadow receiveShadow>
@@ -99,7 +105,7 @@ function BatteryPackProxy({ id, position, rotation, attachedTo }: BatteryPackPro
         anchorX="center"
         anchorY="middle"
       >
-        LiPo 2.5kg
+        LiPo 2S 150g
       </Text>
     </DraggableRigidPart>
   );

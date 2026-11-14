@@ -9,7 +9,7 @@ import type {
 /** Source of truth: docs/3d_asset_socket_coordinate_map.md (1 unit = 10 cm). */
 
 export const POWER_LIPO_BATTERY_ID = 'power_lipo_battery';
-export const BATTERY_PACK_MASS = 2.5;
+export const BATTERY_PACK_MASS = 0.15;
 
 export const PART_TYPES: readonly PartType[] = [
   'CHASSIS_BASE',
@@ -35,12 +35,25 @@ export const PART_CATALOG: Readonly<Record<PartType, PartCatalogEntry>> = {
     label: 'ESP32 Microcontroller',
     dimensions: [0.28, 0.08, 0.55],
     mass: 0.02,
+    pins: [
+      'ESP_VIN',
+      'ESP_GND',
+      'ESP_D13',
+      'ESP_D12',
+      'ESP_D14',
+      'ESP_D27',
+      'ESP_D26',
+      'ESP_D25',
+      'ESP_D33',
+      'ESP_D32',
+    ],
   },
   BATTERY_2S: {
     type: 'BATTERY_2S',
     label: 'LiPo Battery Pack',
     dimensions: [0.35, 0.18, 0.7],
     mass: BATTERY_PACK_MASS,
+    pins: ['VCC_OUT', 'GND_OUT'],
   },
   SERVO_MG90S: {
     type: 'SERVO_MG90S',
@@ -102,7 +115,7 @@ const PIN_YELLOW = '#eab308';
 const PIN_AMBER = '#f59e0b';
 const PIN_SKY = '#38bdf8';
 const PIN_GREEN = '#22c55e';
-const WIRE_GROUND_COLOR = '#334155';
+const WIRE_GROUND_COLOR = '#1c1917';
 
 export const ESP32_PINS: readonly PinDefinition[] = [
   { id: 'ESP_VIN', hostPartType: 'ESP32_DEVKIT', label: '5V / VIN', role: 'POWER', position: [-0.12, 0.05, 0.24], color: PIN_RED, gpio: null },
@@ -132,10 +145,16 @@ export const ULTRASONIC_PINS: readonly PinDefinition[] = [
   { id: 'US_GND', hostPartType: 'ULTRASONIC_HCSR04', label: 'GND', role: 'GROUND', position: [0.09, 0.14, -0.055], color: PIN_SLATE, gpio: null },
 ];
 
+/** 2S LiPo XT60 power output leads on the front (+Z) end of the battery pack. */
+export const BATTERY_PINS: readonly PinDefinition[] = [
+  { id: 'VCC_OUT', hostPartType: 'BATTERY_2S', label: 'VCC_OUT', role: 'POWER', position: [0.035, 0.027, 0.425], color: PIN_RED, gpio: null },
+  { id: 'GND_OUT', hostPartType: 'BATTERY_2S', label: 'GND_OUT', role: 'GROUND', position: [0.085, 0.027, 0.425], color: PIN_SLATE, gpio: null },
+];
+
 export const PINS_BY_PART: Readonly<Record<PartType, readonly PinDefinition[]>> = {
   CHASSIS_BASE: [],
   ESP32_DEVKIT: ESP32_PINS,
-  BATTERY_2S: [],
+  BATTERY_2S: BATTERY_PINS,
   SERVO_MG90S: SERVO_PINS,
   LEG_COXA: [],
   LEG_TIBIA: [],
@@ -147,6 +166,12 @@ export const PINS_BY_PART: Readonly<Record<PartType, readonly PinDefinition[]>> 
 export function findPinDefinition(partType: PartType, pinId: string): PinDefinition | undefined {
   const direct = PINS_BY_PART[partType].find((pin) => pin.id === pinId);
   if (direct) return direct;
+
+  if (partType === 'ESP32_DEVKIT') {
+    const upper = pinId.toUpperCase();
+    if (upper === 'VIN' || upper === '5V') return ESP32_PINS[0];
+    if (upper === 'GND') return ESP32_PINS[1];
+  }
 
   if (partType === 'SERVO_MG90S') {
     const upper = pinId.toUpperCase();
