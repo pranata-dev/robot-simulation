@@ -2,11 +2,18 @@
 
 import { Suspense, useEffect, useRef } from 'react';
 import { Canvas } from '@react-three/fiber';
+import { useFrame } from '@react-three/fiber';
 import { ContactShadows, Environment, OrbitControls } from '@react-three/drei';
-import { CuboidCollider, interactionGroups, Physics, RigidBody } from '@react-three/rapier';
+import { CuboidCollider, interactionGroups, Physics, RigidBody, useRapier } from '@react-three/rapier';
 import type * as THREE from 'three';
 import ChassisBase from '@/components/canvas/parts/robots/spider/ChassisBase';
 import SpiderLegProxy from '@/components/canvas/parts/robots/spider/SpiderLegProxy';
+import InclinedRampProxy from '@/components/canvas/parts/physics/InclinedRampProxy';
+import RollingSolidProxy from '@/components/canvas/parts/physics/RollingSolidProxy';
+import SeesawBeamProxy from '@/components/canvas/parts/physics/SeesawBeamProxy';
+import HarmonicOscillatorProxy from '@/components/canvas/parts/physics/HarmonicOscillatorProxy';
+import CircuitComponentProxy from '@/components/canvas/parts/physics/CircuitComponentProxy';
+import OpticsBenchProxy, { OpticsRayOverlay } from '@/components/canvas/parts/physics/OpticsBenchProxy';
 import BatteryPackProxy from '@/components/canvas/parts/power/BatteryPackProxy';
 import UltrasonicSensorProxy from '@/components/canvas/parts/sensors/UltrasonicSensorProxy';
 import ESP32Proxy from '@/components/canvas/parts/shared/ESP32Proxy';
@@ -19,15 +26,94 @@ import PerformanceMonitorGuard from '@/components/canvas/PerformanceMonitorGuard
 import PhysicsInspectorOverlay from '@/components/canvas/PhysicsInspectorOverlay';
 import WiringSystem from '@/components/canvas/WiringSystem';
 import { useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts';
+import { getLabBlueprint } from '@/lib/blueprints/blueprintRegistry';
 import { clearPhysicsRegistry } from '@/lib/physics/rigidBodyRegistry';
+import {
+  createTelemetryAccumulator,
+  resetPhysicsTelemetry,
+  samplePhysicsTelemetryFrame,
+} from '@/lib/physics/telemetryState';
 import { disposeSceneResources } from '@/lib/three/disposeSceneResources';
 import { useSimulationStore } from '@/store/useSimulationStore';
 import type { ThemeMode, Vector3Tuple } from '@/types/simulator';
 
 const CAMERA_POSITION: Vector3Tuple = [5, 5, 5];
-const GRAVITY: Vector3Tuple = [0, -9.81, 0];
+const FIXED_PHYSICS_TIMESTEP = 1 / 60;
 const FLOOR_SIZE = 20;
 const SHADOW_EXTENT = 6;
+
+/**
+ * Steps Rapier manually at a fixed `1/60s` substep scaled by `timeScale` whenever `timeScale !== 1`,
+ * giving true slow-motion (0.25x, 0.5x) and fast-forward (2x) without solver instability.
+ */
+function PhysicsTimeScaleStepper({
+  isRunning,
+  isPaused,
+  timeScale,
+}: {
+  isRunning: boolean;
+  isPaused: boolean;
+  timeScale: number;
+}) {
+  const { step } = useRapier();
+
+  useFrame((_, delta) => {
+    if (!isRunning || isPaused || timeScale === 1) return;
+    const clampedDelta = Math.min(Math.max(delta, 0), 0.05);
+    step(clampedDelta * timeScale);
+  });
+
+  return null;
+}
+
+/**
+ * Samples kinematics & energy telemetry into `physicsTelemetryRef` when Physics Lab playback is
+ * active while the 3D vector overlay (`PhysicsInspectorOverlay`) is toggled off.
+ */
+function BackgroundPhysicsTelemetrySampler() {
+  const accumulatorRef = useRef(createTelemetryAccumulator());
+
+  useEffect(() => {
+    return () => {
+      resetPhysicsTelemetry();
+    };
+  }, []);
+
+  useFrame((_, delta) => {
+    const dt = Math.min(delta, 0.1);
+    const {
+      workspaceParts,
+      simulationStatus,
+      wiringValidation,
+      servoAngles,
+      gravity,
+      selectedPartId,
+      harmonicMass,
+      pendulumLength,
+      springStiffness,
+      timeScale,
+    } = useSimulationStore.getState();
+
+    samplePhysicsTelemetryFrame(
+      dt,
+      workspaceParts,
+      simulationStatus,
+      wiringValidation,
+      servoAngles,
+      accumulatorRef.current,
+      gravity,
+      selectedPartId,
+      {
+        massKg: harmonicMass,
+        pendulumLengthM: pendulumLength,
+        springStiffness,
+        timeScale,
+      },
+    );
+  });
+
+  return null;
+}
 
 function WorkspaceParts() {
   const workspaceParts = useSimulationStore((state) => state.workspaceParts);
@@ -113,6 +199,55 @@ function WorkspaceParts() {
                 attachedTo={part.attachedTo}
               />
             );
+          case 'physics_inclined_ramp':
+            return (
+              <InclinedRampProxy
+                key={part.id}
+                id={part.id}
+                position={part.position}
+                rotation={part.rotation}
+              />
+            );
+          case 'physics_solid_sphere':
+          case 'physics_solid_cylinder':
+          case 'physics_hollow_cylinder':
+          case 'physics_collision_puck':
+            return (
+              <RollingSolidProxy
+                key={part.id}
+                id={part.id}
+                partType={part.type}
+                position={part.position}
+                rotation={part.rotation}
+                initialVelocity={part.initialVelocity}
+              />
+            );
+          case 'physics_seesaw_beam':
+            return (
+              <SeesawBeamProxy
+                key={part.id}
+                id={part.id}
+                position={part.position}
+                rotation={part.rotation}
+              />
+            );
+          case 'pivot_anchor':
+          case 'pendulum_bob':
+          case 'helical_spring_mass':
+            return <HarmonicOscillatorProxy key={part.id} part={part} />;
+          case 'dc_power_supply':
+          case 'breadboard_base':
+          case 'resistor_component':
+          case 'potentiometer_rheostat':
+          case 'galvanometer_ammeter':
+            return <CircuitComponentProxy key={part.id} part={part} />;
+          case 'laser_emitter':
+          case 'plane_mirror':
+          case 'convex_lens':
+          case 'concave_lens':
+          case 'glass_prism':
+          case 'optical_target_screen':
+            return <OpticsBenchProxy key={part.id} part={part} />;
           case 'LEG_COXA':
             return null;
           default: {
@@ -182,8 +317,14 @@ function ActiveJointSystem() {
 
 export default function SimulationScene() {
   useKeyboardShortcuts();
+  const activeLabId = useSimulationStore((state) => state.activeLabId);
   const simulationStatus = useSimulationStore((state) => state.simulationStatus);
-  const isPhysicsPaused = simulationStatus !== 'playing';
+  const isPaused = useSimulationStore((state) => state.isPaused);
+  const timeScale = useSimulationStore((state) => state.timeScale);
+  const gravity = useSimulationStore((state) => state.gravity);
+  const isRunning = simulationStatus === 'playing';
+  const isPhysicsLab = getLabBlueprint(activeLabId).subject === 'physics';
+  const isPhysicsPaused = !isRunning || isPaused || timeScale !== 1;
   const resetNonce = useSimulationStore((state) => state.resetNonce);
   const theme = useSimulationStore((state) => state.theme);
   const performanceMode = useSimulationStore((state) => state.performanceMode);
@@ -244,7 +385,17 @@ export default function SimulationScene() {
 
         <Suspense fallback={null}>
           <Environment preset="city" environmentIntensity={isDark ? 0.45 : 0.85} />
-          <Physics gravity={GRAVITY} paused={isPhysicsPaused} numSolverIterations={16}>
+          <Physics
+            gravity={gravity}
+            paused={isPhysicsPaused}
+            timeStep={FIXED_PHYSICS_TIMESTEP}
+            numSolverIterations={16}
+          >
+            <PhysicsTimeScaleStepper
+              isRunning={isRunning}
+              isPaused={isPaused}
+              timeScale={timeScale}
+            />
             <Floor theme={theme} />
             <WorkspaceParts key={resetNonce} />
             <ActiveJointSystem />
@@ -252,7 +403,9 @@ export default function SimulationScene() {
         </Suspense>
 
         <WiringSystem />
+        <OpticsRayOverlay />
         {physicsInspectorOpen && <PhysicsInspectorOverlay />}
+        {!physicsInspectorOpen && isRunning && isPhysicsLab && <BackgroundPhysicsTelemetrySampler />}
         <OrbitControls ref={controlsRef} makeDefault target={[0, 0, 0]} enableDamping />
         <CameraViewController controlsRef={controlsRef} defaultCameraPosition={CAMERA_POSITION} />
       </Canvas>

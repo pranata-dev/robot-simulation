@@ -37,6 +37,20 @@ const ESP_PIN_SHORT_LABELS: Partial<Record<PinId, string>> = {
   US_GND: 'GND',
   VCC_OUT: 'VCC_OUT · +',
   GND_OUT: 'GND_OUT · -',
+  DC_POS: '+Vs · DC',
+  DC_NEG: 'GND · DC',
+  BB_POS: '+V Rail',
+  BB_NEG: 'GND Rail',
+  BB_A: 'Node A',
+  BB_B: 'Node B',
+  BB_C: 'Node C',
+  BB_D: 'Node D',
+  RES_1: 'Lead 1',
+  RES_2: 'Lead 2',
+  POT_1: 'Term A',
+  POT_2: 'Wiper B',
+  GALV_POS: 'Galv +',
+  GALV_NEG: 'Galv -',
 };
 
 function getHoverLabel(pin: PinDefinition): string {
@@ -44,6 +58,7 @@ function getHoverLabel(pin: PinDefinition): string {
   if (mapped) return mapped;
   if (pin.role === 'POWER') return '5V';
   if (pin.role === 'GROUND') return 'GND';
+  if (pin.role === 'TERMINAL') return pin.label;
   return 'PWM';
 }
 

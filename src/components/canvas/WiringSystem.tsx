@@ -15,8 +15,8 @@ const MAX_SAG_OFFSET = 0.24;
 const POSITION_EPSILON_SQ = 1e-8;
 const POWER_CABLE_RED = '#ef4444';
 const POWER_CABLE_BLACK = '#1c1917';
-const POWER_PIN_TOKENS = new Set(['VCC_OUT', 'VIN', '5V', 'ESP_VIN', 'SERVO_VCC', 'US_VCC']);
-const GROUND_PIN_TOKENS = new Set(['GND_OUT', 'GND', 'ESP_GND', 'SERVO_GND', 'US_GND']);
+const POWER_PIN_TOKENS = new Set(['VCC_OUT', 'VIN', '5V', 'ESP_VIN', 'SERVO_VCC', 'US_VCC', 'DC_POS', 'BB_POS']);
+const GROUND_PIN_TOKENS = new Set(['GND_OUT', 'GND', 'ESP_GND', 'SERVO_GND', 'US_GND', 'DC_NEG', 'BB_NEG']);
 const BATTERY_FEED_PINS = new Set(['VCC_OUT', 'GND_OUT']);
 
 const _euler = new THREE.Euler();
