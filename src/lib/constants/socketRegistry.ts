@@ -1,6 +1,12 @@
 import {
+  ALL_LAB_BLUEPRINTS,
   ALL_ROBOT_BLUEPRINTS,
+  DEFAULT_LAB_ID,
+  LAB_REGISTRY,
   ROBOT_BLUEPRINTS,
+  findPresetById,
+  getLabBlueprint,
+  getPresetsForLab,
   getRobotBlueprint,
 } from '@/lib/blueprints/blueprintRegistry';
 import {
@@ -45,10 +51,13 @@ import type {
 } from '@/types/simulator';
 
 export {
+  ALL_LAB_BLUEPRINTS,
   ALL_ROBOT_BLUEPRINTS,
   BATTERY_PINS,
   CHASSIS_ASSEMBLY_WORKING_Y,
+  DEFAULT_LAB_ID,
   ESP32_PINS,
+  LAB_REGISTRY,
   PART_CATALOG,
   PART_TYPES,
   PINS_BY_PART,
@@ -65,6 +74,9 @@ export {
   TIBIA_FOOT_TIP,
   ULTRASONIC_PINS,
   findPinDefinition,
+  findPresetById,
+  getLabBlueprint,
+  getPresetsForLab,
   getWireColorForPinRole,
 };
 
@@ -141,7 +153,7 @@ export function findActivePresetById(
   presetId: string,
   blueprintId?: RobotBlueprintId,
 ): BuiltInPreset | undefined {
-  return getActivePresets(blueprintId).find((preset) => preset.id === presetId);
+  return getActivePresets(blueprintId).find((preset) => preset.id === presetId) ?? findPresetById(presetId);
 }
 
 export {

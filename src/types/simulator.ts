@@ -11,7 +11,49 @@ export type PartType =
   | 'LEG_TIBIA'
   | 'ULTRASONIC_HCSR04'
   | 'OBSTACLE_BLOCK'
-  | 'TARGET_ZONE';
+  | 'TARGET_ZONE'
+  | 'physics_inclined_ramp'
+  | 'physics_solid_sphere'
+  | 'physics_solid_cylinder'
+  | 'physics_hollow_cylinder'
+  | 'physics_collision_puck'
+  | 'physics_seesaw_beam'
+  | 'pivot_anchor'
+  | 'pendulum_bob'
+  | 'helical_spring_mass'
+  | 'dc_power_supply'
+  | 'breadboard_base'
+  | 'resistor_component'
+  | 'potentiometer_rheostat'
+  | 'galvanometer_ammeter'
+  | 'laser_emitter'
+  | 'plane_mirror'
+  | 'convex_lens'
+  | 'concave_lens'
+  | 'glass_prism'
+  | 'optical_target_screen';
+
+export type SubjectCategory = 'robotics' | 'physics' | 'math' | 'chemistry' | 'biology';
+
+export type CollisionLayer = 'robot_part' | 'free_body' | 'environment';
+
+export interface LabUIConfig {
+  showCodeEditor: boolean;
+  showWiringTools: boolean;
+  showBatteryTelemetry: boolean;
+  showUltrasonicTelemetry: boolean;
+  showWhatIfSliders: boolean;
+}
+
+export interface LabBlueprint {
+  id: string;
+  name: string;
+  subject: SubjectCategory;
+  description: string;
+  allowedCategories?: string[];
+  defaultPresetId: string;
+  uiConfig: LabUIConfig;
+}
 
 export type SimulationStatus = 'idle' | 'playing' | 'paused';
 
@@ -29,7 +71,11 @@ export type ChassisSocketId =
   | 'SOCKET_HIP_BR'
   | 'socket-ultrasonic-front';
 
-export type SubSocketId = 'SOCKET_SERVO_HORN' | 'SOCKET_COXA_DISTAL';
+export type SubSocketId =
+  | 'SOCKET_SERVO_HORN'
+  | 'SOCKET_COXA_DISTAL'
+  | 'socket-harmonic-pivot'
+  | 'socket-harmonic-spring';
 
 export type SocketId = ChassisSocketId | SubSocketId;
 
@@ -51,19 +97,46 @@ export type UltrasonicPinId = 'US_VCC' | 'US_TRIG' | 'US_ECHO' | 'US_GND';
 
 export type BatteryPinId = 'VCC_OUT' | 'GND_OUT';
 
-export type PinId = Esp32PinId | ServoPinId | UltrasonicPinId | BatteryPinId;
+export type DcSupplyPinId = 'DC_POS' | 'DC_NEG';
 
-export type PinRole = 'POWER' | 'GROUND' | 'PWM';
+export type BreadboardPinId = 'BB_POS' | 'BB_NEG' | 'BB_A' | 'BB_B' | 'BB_C' | 'BB_D';
 
-export type JointKind = 'FIXED' | 'REVOLUTE';
+export type ResistorPinId = 'RES_1' | 'RES_2';
+
+export type PotentiometerPinId = 'POT_1' | 'POT_2';
+
+export type GalvanometerPinId = 'GALV_POS' | 'GALV_NEG';
+
+export type PinId =
+  | Esp32PinId
+  | ServoPinId
+  | UltrasonicPinId
+  | BatteryPinId
+  | DcSupplyPinId
+  | BreadboardPinId
+  | ResistorPinId
+  | PotentiometerPinId
+  | GalvanometerPinId;
+
+export type PinRole = 'POWER' | 'GROUND' | 'PWM' | 'TERMINAL';
+
+export type JointKind = 'FIXED' | 'REVOLUTE' | 'SPHERICAL';
 
 export interface PartCatalogEntry {
   type: PartType;
   label: string;
+  /** Subject domain that owns this part (or `'shared'` across labs). */
+  category: SubjectCategory | 'shared';
   /** Proxy bounding dimensions [x, y, z] in scene units (1 unit = 10 cm). */
   dimensions: Vector3Tuple;
   /** Mass in kg. */
   mass: number;
+  /** Rapier collision isolation layer for this part. */
+  collisionLayer: CollisionLayer;
+  /** Optional default surface friction coefficient. */
+  defaultFriction?: number;
+  /** Optional default restitution coefficient in [0, 1]. */
+  defaultRestitution?: number;
   /** Pin identifiers exposed by this part, if interactive. */
   pins?: readonly PinId[];
 }
@@ -109,6 +182,12 @@ export interface WorkspacePart {
   position: Vector3Tuple;
   /** World Euler rotation [x, y, z] in radians. */
   rotation: Vector3Tuple;
+  /** Optional initial linear velocity [vx, vy, vz] in m/s applied when simulation starts. */
+  initialVelocity?: Vector3Tuple;
+  /** Optional circuit bridge role identifier for resistors/potentiometers. */
+  circuitRole?: 'r1' | 'r2' | 'r3' | 'rvar' | 'rx';
+  /** Optional explicit resistance in Ohms for passive bench components. */
+  resistanceOhms?: number;
   /** UUID of the parent part this part is snapped to. */
   attachedTo?: string;
   /** Identifier of the parent socket this part is snapped to. */
@@ -154,7 +233,8 @@ export type CircuitFaultKind =
   | 'ROLE_MISMATCH'
   | 'MISSING_POWER'
   | 'MISSING_GROUND'
-  | 'MISSING_PWM';
+  | 'MISSING_PWM'
+  | 'OPEN_BRANCH';
 
 export interface CircuitDiagnosticIssue {
   id: string;
@@ -266,6 +346,7 @@ export interface SimulationEmbedConfig {
 
 export interface BuiltInPreset {
   id: string;
+  labId: string;
   name: string;
   description: string;
   snapshot: SimulationSnapshot;
@@ -281,5 +362,58 @@ export interface RobotBlueprintConfig {
   sockets: Readonly<Record<PartType, readonly SocketDefinition[]>>;
   defaultInventoryCounts: Readonly<Record<PartType, number>>;
   presets: readonly BuiltInPreset[];
+}
+
+export interface MnaBranchReading {
+  partId: string;
+  label: string;
+  resistanceOhms: number;
+  currentAmps: number;
+  voltageDropVolts: number;
+  powerWatts: number;
+}
+
+export interface MnaCircuitSolution {
+  hasDcCircuit: boolean;
+  hasShortCircuit: boolean;
+  hasOpenBranch: boolean;
+  isBalanced: boolean;
+  sourceVoltage: number;
+  equivalentResistanceOhms: number | null;
+  sourceCurrentAmps: number;
+  nodeVoltages: {
+    nodeA: number | null;
+    nodeB: number | null;
+    nodeC: number | null;
+    nodeD: number | null;
+  };
+  bridgeDiffVolts: number;
+  galvanometerCurrentAmps: number;
+  branches: readonly MnaBranchReading[];
+  diagnostics: readonly string[];
+}
+
+export interface OpticsRaySegment {
+  start: Vector3Tuple;
+  end: Vector3Tuple;
+  hitPoint: Vector3Tuple | null;
+  hitNormal: Vector3Tuple | null;
+  hitPartId: string | null;
+  hitPartType: PartType | null;
+  interaction: 'NONE' | 'REFLECT' | 'REFRACT' | 'TIR' | 'LENS' | 'ABSORB' | 'TARGET';
+  incidentDeg: number | null;
+  outgoingDeg: number | null;
+  criticalDeg: number | null;
+}
+
+export interface OpticsRaytraceResult {
+  hasOpticsBench: boolean;
+  segments: readonly OpticsRaySegment[];
+  targetHit: boolean;
+  targetHitPoint: Vector3Tuple | null;
+  primaryIncidentDeg: number | null;
+  primaryOutgoingDeg: number | null;
+  criticalAngleDeg: number | null;
+  totalInternalReflection: boolean;
 }
 

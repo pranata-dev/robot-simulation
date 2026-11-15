@@ -69,6 +69,26 @@ export const SPIDER_BILL_OF_MATERIALS: Readonly<Record<PartType, number>> = {
   ULTRASONIC_HCSR04: 1,
   OBSTACLE_BLOCK: 99,
   TARGET_ZONE: 99,
+  physics_inclined_ramp: 4,
+  physics_solid_sphere: 12,
+  physics_solid_cylinder: 12,
+  physics_hollow_cylinder: 12,
+  physics_collision_puck: 12,
+  physics_seesaw_beam: 4,
+  pivot_anchor: 4,
+  pendulum_bob: 4,
+  helical_spring_mass: 4,
+  dc_power_supply: 2,
+  breadboard_base: 2,
+  resistor_component: 8,
+  potentiometer_rheostat: 4,
+  galvanometer_ammeter: 2,
+  laser_emitter: 2,
+  plane_mirror: 4,
+  convex_lens: 4,
+  concave_lens: 4,
+  glass_prism: 4,
+  optical_target_screen: 4,
 };
 
 export const SPIDER_CHASSIS_SOCKETS: readonly SocketDefinition[] = [
@@ -161,6 +181,18 @@ export const SPIDER_COXA_SOCKETS: readonly SocketDefinition[] = [
   },
 ];
 
+export const PIVOT_ANCHOR_SOCKETS: readonly SocketDefinition[] = [
+  {
+    id: 'socket-harmonic-pivot',
+    hostPartType: 'pivot_anchor',
+    allowedTypes: ['pendulum_bob', 'helical_spring_mass'],
+    position: [0.0, -2.0, 0.0],
+    rotation: [0, 0, 0],
+    jointKind: 'SPHERICAL',
+    jointAxis: null,
+  },
+];
+
 export const SPIDER_SOCKETS_BY_PART: Readonly<Record<PartType, readonly SocketDefinition[]>> = {
   CHASSIS_BASE: SPIDER_CHASSIS_SOCKETS,
   ESP32_DEVKIT: [],
@@ -171,6 +203,26 @@ export const SPIDER_SOCKETS_BY_PART: Readonly<Record<PartType, readonly SocketDe
   ULTRASONIC_HCSR04: [],
   OBSTACLE_BLOCK: [],
   TARGET_ZONE: [],
+  physics_inclined_ramp: [],
+  physics_solid_sphere: [],
+  physics_solid_cylinder: [],
+  physics_hollow_cylinder: [],
+  physics_collision_puck: [],
+  physics_seesaw_beam: [],
+  pivot_anchor: PIVOT_ANCHOR_SOCKETS,
+  pendulum_bob: [],
+  helical_spring_mass: [],
+  dc_power_supply: [],
+  breadboard_base: [],
+  resistor_component: [],
+  potentiometer_rheostat: [],
+  galvanometer_ammeter: [],
+  laser_emitter: [],
+  plane_mirror: [],
+  convex_lens: [],
+  concave_lens: [],
+  glass_prism: [],
+  optical_target_screen: [],
 };
 
 export const SPIDER_PRESETS = buildSpiderPresets(

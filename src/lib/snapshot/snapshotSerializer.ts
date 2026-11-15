@@ -29,6 +29,26 @@ const IMPLEMENTED_PART_TYPES = new Set<PartType>([
   'ULTRASONIC_HCSR04',
   'OBSTACLE_BLOCK',
   'TARGET_ZONE',
+  'physics_inclined_ramp',
+  'physics_solid_sphere',
+  'physics_solid_cylinder',
+  'physics_hollow_cylinder',
+  'physics_collision_puck',
+  'physics_seesaw_beam',
+  'pivot_anchor',
+  'pendulum_bob',
+  'helical_spring_mass',
+  'dc_power_supply',
+  'breadboard_base',
+  'resistor_component',
+  'potentiometer_rheostat',
+  'galvanometer_ammeter',
+  'laser_emitter',
+  'plane_mirror',
+  'convex_lens',
+  'concave_lens',
+  'glass_prism',
+  'optical_target_screen',
 ]);
 
 const SOCKET_DEFINITIONS_BY_ID = new Map<SocketId, SocketDefinition>(
@@ -110,6 +130,9 @@ export function serializeSimulationSnapshot(snapshot: {
       label: part.label,
       position: [part.position[0], part.position[1], part.position[2]],
       rotation: [part.rotation[0], part.rotation[1], part.rotation[2]],
+      ...(part.initialVelocity !== undefined
+        ? { initialVelocity: [part.initialVelocity[0], part.initialVelocity[1], part.initialVelocity[2]] }
+        : {}),
       ...(part.attachedTo !== undefined ? { attachedTo: part.attachedTo } : {}),
       ...(part.socketId !== undefined ? { socketId: part.socketId } : {}),
     })),
@@ -196,6 +219,13 @@ export function parseAndValidateSimulationSnapshot(jsonString: string): ParsedSn
       };
     }
 
+    if (entry.initialVelocity !== undefined && !isFiniteVector3Tuple(entry.initialVelocity)) {
+      return {
+        success: false,
+        error: `workspaceParts[${i}].initialVelocity must be a 3D finite number tuple.`,
+      };
+    }
+
     const hasAttachedTo = entry.attachedTo !== undefined;
     const hasSocketId = entry.socketId !== undefined;
     if (hasAttachedTo && !isNonEmptyString(entry.attachedTo)) {
@@ -218,6 +248,15 @@ export function parseAndValidateSimulationSnapshot(jsonString: string): ParsedSn
       label: entry.label,
       position: [entry.position[0], entry.position[1], entry.position[2]],
       rotation: [entry.rotation[0], entry.rotation[1], entry.rotation[2]],
+      ...(isFiniteVector3Tuple(entry.initialVelocity)
+        ? {
+            initialVelocity: [
+              entry.initialVelocity[0],
+              entry.initialVelocity[1],
+              entry.initialVelocity[2],
+            ] as Vector3Tuple,
+          }
+        : {}),
       ...(hasAttachedTo ? { attachedTo: entry.attachedTo as string } : {}),
       ...(hasSocketId ? { socketId: entry.socketId as SocketId } : {}),
     });
