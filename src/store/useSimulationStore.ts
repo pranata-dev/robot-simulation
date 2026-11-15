@@ -5,6 +5,7 @@ import type { RapierRigidBody } from '@react-three/rapier';
 import { v4 as uuidv4 } from 'uuid';
 import { create } from 'zustand';
 import {
+  DEFAULT_LAB_ID,
   ESP32_PINS,
   PART_CATALOG,
   findActivePresetById,
@@ -12,6 +13,7 @@ import {
   getActiveChassisAssemblyWorkingY,
   getActiveChassisHalfHeight,
   getActiveDefaultInventoryCounts,
+  getLabBlueprint,
   getWireColorForPinRole,
   registerActiveBlueprintIdReader,
 } from '@/lib/constants/socketRegistry';
@@ -29,6 +31,7 @@ import {
   unregisterServoHornRef,
 } from '@/lib/physics/rigidBodyRegistry';
 import { computeFootClearanceLift } from '@/lib/physics/footClearance';
+import { reprojectPartsOntoRamp } from '@/lib/physics/rampGeometry';
 import { clampServoAngleDeg } from '@/lib/physics/servoMotorControl';
 import {
   parseAndValidateSimulationSnapshot,
@@ -66,12 +69,36 @@ import { resolveHierarchyWorldTransforms } from '@/utils/snapLogic';
 
 export interface SimulationData {
   schemaVersion: SimulationSchemaVersion;
+  activeLabId: string;
   activeBlueprintId: RobotBlueprintId;
   inventory: InventoryItem[];
   workspaceParts: WorkspacePart[];
   wires: WireConnection[];
   activeDraftWire: DraftWire | null;
   simulationStatus: SimulationStatus;
+  isPaused: boolean;
+  timeScale: number;
+  gravity: Vector3Tuple;
+  surfaceFriction: number;
+  restitution: number;
+  rampAngle: number;
+  launchSpeed: number;
+  harmonicMass: number;
+  pendulumLength: number;
+  springStiffness: number;
+  springDamping: number;
+  harmonicReleaseNonce: number;
+  sourceVoltage: number;
+  r1Ohms: number;
+  r2Ohms: number;
+  r3Ohms: number;
+  rVarOhms: number;
+  rxOhms: number;
+  laserYawDeg: number;
+  laserPitchDeg: number;
+  opticalElementYawDeg: number;
+  refractiveIndex: number;
+  lensFocalLength: number;
   selectedPartId: string | null;
   activeSnapTarget: ActiveSnapTarget | null;
   viewMode: ViewMode;
@@ -141,7 +168,31 @@ export interface SimulationActions {
   centerAllServos: () => void;
   startManualServoTest: () => void;
   loadPreset: (presetId: string) => boolean;
+  setActiveLab: (labId: string) => void;
   setActiveBlueprint: (blueprintId: RobotBlueprintId) => void;
+  togglePause: () => void;
+  setTimeScale: (scale: number) => void;
+  setGravity: (gravity: Vector3Tuple) => void;
+  setSurfaceFriction: (friction: number) => void;
+  setRestitution: (restitution: number) => void;
+  setRampAngle: (angleDeg: number) => void;
+  setLaunchSpeed: (speed: number) => void;
+  setHarmonicMass: (massKg: number) => void;
+  setPendulumLength: (lengthM: number) => void;
+  setSpringStiffness: (stiffness: number) => void;
+  setSpringDamping: (damping: number) => void;
+  triggerHarmonicRelease: () => void;
+  setSourceVoltage: (volts: number) => void;
+  setR1Ohms: (ohms: number) => void;
+  setR2Ohms: (ohms: number) => void;
+  setR3Ohms: (ohms: number) => void;
+  setRVarOhms: (ohms: number) => void;
+  setRxOhms: (ohms: number) => void;
+  setLaserYawDeg: (deg: number) => void;
+  setLaserPitchDeg: (deg: number) => void;
+  setOpticalElementYawDeg: (deg: number) => void;
+  setRefractiveIndex: (n: number) => void;
+  setLensFocalLength: (focalM: number) => void;
   undo: () => void;
   redo: () => void;
   dismissCircuitDiagnostics: () => void;
@@ -240,6 +291,26 @@ const ACTIVE_INVENTORY_TYPES: readonly PartType[] = [
   'SERVO_MG90S',
   'LEG_TIBIA',
   'ULTRASONIC_HCSR04',
+  'physics_inclined_ramp',
+  'physics_solid_sphere',
+  'physics_solid_cylinder',
+  'physics_hollow_cylinder',
+  'physics_collision_puck',
+  'physics_seesaw_beam',
+  'pivot_anchor',
+  'pendulum_bob',
+  'helical_spring_mass',
+  'dc_power_supply',
+  'breadboard_base',
+  'resistor_component',
+  'potentiometer_rheostat',
+  'galvanometer_ammeter',
+  'laser_emitter',
+  'plane_mirror',
+  'convex_lens',
+  'concave_lens',
+  'glass_prism',
+  'optical_target_screen',
   'OBSTACLE_BLOCK',
   'TARGET_ZONE',
 ];
@@ -253,6 +324,37 @@ function getDefaultSpawnPosition(type: PartType): Vector3Tuple {
   }
   if (type === 'TARGET_ZONE') {
     return [0, 0, 2.8];
+  }
+  if (
+    type === 'physics_inclined_ramp' ||
+    type === 'physics_seesaw_beam' ||
+    type === 'dc_power_supply' ||
+    type === 'breadboard_base' ||
+    type === 'resistor_component' ||
+    type === 'potentiometer_rheostat' ||
+    type === 'galvanometer_ammeter' ||
+    type === 'laser_emitter' ||
+    type === 'plane_mirror' ||
+    type === 'convex_lens' ||
+    type === 'concave_lens' ||
+    type === 'glass_prism' ||
+    type === 'optical_target_screen'
+  ) {
+    return [0, 0, 0];
+  }
+  if (type === 'pivot_anchor') {
+    return [0, 3.6, 0];
+  }
+  if (type === 'pendulum_bob' || type === 'helical_spring_mass') {
+    return [0, 1.6, 0];
+  }
+  if (
+    type === 'physics_solid_sphere' ||
+    type === 'physics_solid_cylinder' ||
+    type === 'physics_hollow_cylinder' ||
+    type === 'physics_collision_puck'
+  ) {
+    return [0, 0.25, 0];
   }
   return DEFAULT_SPAWN_POSITION;
 }
@@ -327,6 +429,9 @@ function cloneWorkspaceParts(workspaceParts: readonly WorkspacePart[]): Workspac
     ...part,
     position: [...part.position] as Vector3Tuple,
     rotation: [...part.rotation] as Vector3Tuple,
+    ...(part.initialVelocity
+      ? { initialVelocity: [...part.initialVelocity] as Vector3Tuple }
+      : {}),
   }));
 }
 
@@ -368,7 +473,30 @@ function reconcileChassisElevations(workspaceParts: WorkspacePart[]): WorkspaceP
 }
 
 function isSandboxCoursePart(type: PartType): boolean {
-  return type === 'OBSTACLE_BLOCK' || type === 'TARGET_ZONE';
+  return (
+    type === 'OBSTACLE_BLOCK' ||
+    type === 'TARGET_ZONE' ||
+    type === 'physics_inclined_ramp' ||
+    type === 'physics_solid_sphere' ||
+    type === 'physics_solid_cylinder' ||
+    type === 'physics_hollow_cylinder' ||
+    type === 'physics_collision_puck' ||
+    type === 'physics_seesaw_beam' ||
+    type === 'pivot_anchor' ||
+    type === 'pendulum_bob' ||
+    type === 'helical_spring_mass' ||
+    type === 'dc_power_supply' ||
+    type === 'breadboard_base' ||
+    type === 'resistor_component' ||
+    type === 'potentiometer_rheostat' ||
+    type === 'galvanometer_ammeter' ||
+    type === 'laser_emitter' ||
+    type === 'plane_mirror' ||
+    type === 'convex_lens' ||
+    type === 'concave_lens' ||
+    type === 'glass_prism' ||
+    type === 'optical_target_screen'
+  );
 }
 
 function createInitialInventory(blueprintId: RobotBlueprintId = 'spider'): InventoryItem[] {
@@ -493,12 +621,36 @@ function buildRestoredHistorySlice(
 function createInitialData(blueprintId: RobotBlueprintId = 'spider'): SimulationData {
   return {
     schemaVersion: SIMULATION_SCHEMA_VERSION,
+    activeLabId: DEFAULT_LAB_ID,
     activeBlueprintId: blueprintId,
     inventory: createInitialInventory(blueprintId),
     workspaceParts: [],
     wires: [],
     activeDraftWire: null,
     simulationStatus: 'idle',
+    isPaused: false,
+    timeScale: 1.0,
+    gravity: [0, -9.81, 0],
+    surfaceFriction: 0.6,
+    restitution: 0.8,
+    rampAngle: 20,
+    launchSpeed: 4.0,
+    harmonicMass: 1.0,
+    pendulumLength: 2.0,
+    springStiffness: 18.0,
+    springDamping: 0.25,
+    harmonicReleaseNonce: 0,
+    sourceVoltage: 10.0,
+    r1Ohms: 100,
+    r2Ohms: 200,
+    r3Ohms: 150,
+    rVarOhms: 220,
+    rxOhms: 300,
+    laserYawDeg: 0,
+    laserPitchDeg: 0,
+    opticalElementYawDeg: 0,
+    refractiveIndex: 1.5,
+    lensFocalLength: 1.8,
     selectedPartId: null,
     activeSnapTarget: null,
     viewMode: 'normal',
@@ -1171,6 +1323,7 @@ export const useSimulationStore = create<SimulationState>()((set, get) => ({
         simulationRunId: wasPlaying ? state.simulationRunId : state.simulationRunId + 1,
         runId: wasPlaying ? state.runId : state.runId + 1,
         simulationStatus: 'playing',
+        isPaused: false,
         challengeStatus: 'in_progress',
         batteryLevel: wasPlaying ? state.batteryLevel : 100,
         simulationStartedAt: state.simulationStartedAt ?? Date.now(),
@@ -1203,6 +1356,9 @@ export const useSimulationStore = create<SimulationState>()((set, get) => ({
       attachedTo: part.attachedTo ? idMap.get(part.attachedTo) : undefined,
       position: [...part.position] as Vector3Tuple,
       rotation: [...part.rotation] as Vector3Tuple,
+      ...(part.initialVelocity
+        ? { initialVelocity: [...part.initialVelocity] as Vector3Tuple }
+        : {}),
     }));
 
     const clonedWires: WireConnection[] = snapshot.wires.map((wire) => ({
@@ -1213,8 +1369,9 @@ export const useSimulationStore = create<SimulationState>()((set, get) => ({
     }));
 
     const rootIds = new Set(clonedParts.filter((part) => !part.attachedTo).map((part) => part.id));
-    const resolvedParts = reconcileChassisElevations(
-      resolveHierarchyWorldTransforms(clonedParts, rootIds),
+    const resolvedParts = reprojectPartsOntoRamp(
+      reconcileChassisElevations(resolveHierarchyWorldTransforms(clonedParts, rootIds)),
+      get().rampAngle,
     );
     const nextWiringMode = snapshot.wiringMode ?? get().wiringMode;
 
@@ -1245,6 +1402,7 @@ export const useSimulationStore = create<SimulationState>()((set, get) => ({
         activeSnapTarget: null,
         selectedPartId: null,
         simulationStatus: 'idle',
+        isPaused: false,
         challengeStatus: 'idle',
         obstacleHits: 0,
         simulationStartedAt: null,
@@ -1254,6 +1412,21 @@ export const useSimulationStore = create<SimulationState>()((set, get) => ({
         servoAngles: {},
         sensorDistances: {},
         batteryLevel: 100,
+        harmonicMass: 1.0,
+        pendulumLength: 2.0,
+        springStiffness: 18.0,
+        springDamping: 0.25,
+        sourceVoltage: 10.0,
+        r1Ohms: 100,
+        r2Ohms: 200,
+        r3Ohms: 150,
+        rVarOhms: 220,
+        rxOhms: 300,
+        laserYawDeg: 0,
+        laserPitchDeg: 0,
+        opticalElementYawDeg: 0,
+        refractiveIndex: 1.5,
+        lensFocalLength: 1.8,
         rigidBodyRefs: {},
         scriptLogs: [],
         assembledPartsSnapshot: null,
@@ -1265,6 +1438,44 @@ export const useSimulationStore = create<SimulationState>()((set, get) => ({
     return true;
   },
 
+  setActiveLab: (labId) => {
+    if (get().readOnly) return;
+    const lab = getLabBlueprint(labId);
+    if (get().simulationStatus === 'playing') {
+      get().stopSimulation();
+    } else {
+      activeExecutionRunId += 1;
+      terminateActiveScriptWorker();
+      zeroRigidBodyVelocities(get().rigidBodyRefs);
+    }
+
+    set({
+      activeLabId: lab.id,
+      isPaused: false,
+      surfaceFriction: 0.6,
+      restitution: 0.8,
+      rampAngle: 20,
+      launchSpeed: 4.0,
+      harmonicMass: 1.0,
+      pendulumLength: 2.0,
+      springStiffness: 18.0,
+      springDamping: 0.25,
+      sourceVoltage: 10.0,
+      r1Ohms: 100,
+      r2Ohms: 200,
+      r3Ohms: 150,
+      rVarOhms: 220,
+      rxOhms: 300,
+      laserYawDeg: 0,
+      laserPitchDeg: 0,
+      opticalElementYawDeg: 0,
+      refractiveIndex: 1.5,
+      lensFocalLength: 1.8,
+    });
+
+    get().loadPreset(lab.defaultPresetId);
+  },
+
   setActiveBlueprint: (blueprintId) => {
     if (get().readOnly || get().activeBlueprintId === blueprintId) return;
     activeExecutionRunId += 1;
@@ -1272,6 +1483,7 @@ export const useSimulationStore = create<SimulationState>()((set, get) => ({
     zeroRigidBodyVelocities(get().rigidBodyRefs);
     clearPhysicsRegistry();
     const {
+      activeLabId,
       theme,
       wiringMode,
       viewMode,
@@ -1283,6 +1495,7 @@ export const useSimulationStore = create<SimulationState>()((set, get) => ({
     } = get();
     set({
       ...createInitialData(blueprintId),
+      activeLabId,
       theme,
       wiringMode,
       viewMode,
@@ -1292,6 +1505,169 @@ export const useSimulationStore = create<SimulationState>()((set, get) => ({
       zeroCollisionMode,
       performanceMode,
     });
+  },
+
+  togglePause: () => {
+    if (get().simulationStatus !== 'playing') return;
+    set((state) => ({ isPaused: !state.isPaused }));
+  },
+
+  setTimeScale: (scale) => {
+    if (!Number.isFinite(scale) || scale <= 0) return;
+    const clampedScale = Math.max(0.1, Math.min(4.0, scale));
+    set({ timeScale: clampedScale });
+  },
+
+  setGravity: (gravity) => {
+    if (!gravity.every((component) => Number.isFinite(component))) return;
+    set({ gravity: [gravity[0], gravity[1], gravity[2]] });
+  },
+
+  setSurfaceFriction: (friction) => {
+    if (!Number.isFinite(friction)) return;
+    set({ surfaceFriction: Math.max(0.0, Math.min(1.5, friction)) });
+  },
+
+  setRestitution: (restitution) => {
+    if (!Number.isFinite(restitution)) return;
+    set({ restitution: Math.max(0.0, Math.min(1.0, restitution)) });
+  },
+
+  setRampAngle: (angleDeg) => {
+    if (!Number.isFinite(angleDeg)) return;
+    const clampedAngle = Math.max(5, Math.min(45, angleDeg));
+    set((state) => ({
+      rampAngle: clampedAngle,
+      workspaceParts:
+        state.simulationStatus === 'idle'
+          ? reprojectPartsOntoRamp(state.workspaceParts, clampedAngle)
+          : state.workspaceParts,
+    }));
+  },
+
+  setLaunchSpeed: (speed) => {
+    if (!Number.isFinite(speed)) return;
+    set({ launchSpeed: Math.max(0.0, Math.min(12.0, speed)) });
+  },
+
+  setHarmonicMass: (massKg) => {
+    if (!Number.isFinite(massKg)) return;
+    const clampedMass = Math.max(0.2, Math.min(5.0, massKg));
+    set({ harmonicMass: clampedMass });
+  },
+
+  setPendulumLength: (lengthM) => {
+    if (!Number.isFinite(lengthM)) return;
+    const clampedLen = Math.max(0.8, Math.min(3.2, lengthM));
+    set((state) => {
+      if (state.simulationStatus !== 'idle') {
+        return { pendulumLength: clampedLen };
+      }
+      const nextParts = state.workspaceParts.map((part) => {
+        if (part.type !== 'pendulum_bob' || !part.attachedTo) return part;
+        const pivot = state.workspaceParts.find((p) => p.id === part.attachedTo);
+        if (!pivot) return part;
+        const thetaRad = (25 * Math.PI) / 180;
+        return {
+          ...part,
+          position: [
+            pivot.position[0] + clampedLen * Math.sin(thetaRad),
+            pivot.position[1] - clampedLen * Math.cos(thetaRad),
+            pivot.position[2],
+          ] as Vector3Tuple,
+        };
+      });
+      return { pendulumLength: clampedLen, workspaceParts: nextParts };
+    });
+  },
+
+  setSpringStiffness: (stiffness) => {
+    if (!Number.isFinite(stiffness)) return;
+    set({ springStiffness: Math.max(2.0, Math.min(80.0, stiffness)) });
+  },
+
+  setSpringDamping: (damping) => {
+    if (!Number.isFinite(damping)) return;
+    set({ springDamping: Math.max(0.0, Math.min(3.0, damping)) });
+  },
+
+  triggerHarmonicRelease: () => {
+    const state = get();
+    if (state.simulationStatus === 'idle') {
+      state.runSimulation();
+      return;
+    }
+    set((curr) => ({ harmonicReleaseNonce: curr.harmonicReleaseNonce + 1 }));
+    for (const part of state.workspaceParts) {
+      if (part.type !== 'pendulum_bob' && part.type !== 'helical_spring_mass') continue;
+      const body = state.rigidBodyRefs[part.id]?.current;
+      if (!body) continue;
+      try {
+        body.wakeUp();
+        if (part.type === 'pendulum_bob') {
+          body.applyImpulse({ x: 1.4 * state.harmonicMass, y: 0, z: 0 }, true);
+        } else {
+          body.applyImpulse({ x: 0, y: -1.8 * state.harmonicMass, z: 0 }, true);
+        }
+      } catch {
+        // Ignore unmounted body ref
+      }
+    }
+  },
+
+  setSourceVoltage: (volts) => {
+    if (!Number.isFinite(volts)) return;
+    set({ sourceVoltage: Math.max(0.0, Math.min(24.0, volts)) });
+  },
+
+  setR1Ohms: (ohms) => {
+    if (!Number.isFinite(ohms)) return;
+    set({ r1Ohms: Math.max(10, Math.min(1000, ohms)) });
+  },
+
+  setR2Ohms: (ohms) => {
+    if (!Number.isFinite(ohms)) return;
+    set({ r2Ohms: Math.max(10, Math.min(1000, ohms)) });
+  },
+
+  setR3Ohms: (ohms) => {
+    if (!Number.isFinite(ohms)) return;
+    set({ r3Ohms: Math.max(10, Math.min(1000, ohms)) });
+  },
+
+  setRVarOhms: (ohms) => {
+    if (!Number.isFinite(ohms)) return;
+    set({ rVarOhms: Math.max(10, Math.min(1000, ohms)) });
+  },
+
+  setRxOhms: (ohms) => {
+    if (!Number.isFinite(ohms)) return;
+    set({ rxOhms: Math.max(10, Math.min(1000, ohms)) });
+  },
+
+  setLaserYawDeg: (deg) => {
+    if (!Number.isFinite(deg)) return;
+    set({ laserYawDeg: Math.max(-45, Math.min(45, deg)) });
+  },
+
+  setLaserPitchDeg: (deg) => {
+    if (!Number.isFinite(deg)) return;
+    set({ laserPitchDeg: Math.max(-25, Math.min(25, deg)) });
+  },
+
+  setOpticalElementYawDeg: (deg) => {
+    if (!Number.isFinite(deg)) return;
+    set({ opticalElementYawDeg: Math.max(-90, Math.min(90, deg)) });
+  },
+
+  setRefractiveIndex: (n) => {
+    if (!Number.isFinite(n)) return;
+    set({ refractiveIndex: Math.max(1.0, Math.min(2.42, n)) });
+  },
+
+  setLensFocalLength: (focalM) => {
+    if (!Number.isFinite(focalM)) return;
+    set({ lensFocalLength: Math.max(0.6, Math.min(5.0, focalM)) });
   },
 
   undo: () => {
@@ -1396,6 +1772,7 @@ export const useSimulationStore = create<SimulationState>()((set, get) => ({
         runId: state.runId + 1,
         resetNonce: wasAlreadyPlaying ? state.resetNonce + 1 : state.resetNonce,
         simulationStatus: 'playing',
+        isPaused: false,
         challengeStatus: 'in_progress',
         obstacleHits: 0,
         simulationStartedAt: Date.now(),
@@ -1406,7 +1783,11 @@ export const useSimulationStore = create<SimulationState>()((set, get) => ({
       };
     });
 
+    const lab = getLabBlueprint(get().activeLabId);
     const latestScript = get().script;
+    if (!lab.uiConfig.showCodeEditor || latestScript.trim().length === 0) {
+      return;
+    }
 
     if (typeof Worker === 'undefined') {
       set({
@@ -1643,12 +2024,28 @@ export const useSimulationStore = create<SimulationState>()((set, get) => ({
       );
       return {
         simulationStatus: 'idle',
+        isPaused: false,
         challengeStatus: state.challengeStatus === 'in_progress' ? 'idle' : state.challengeStatus,
         assembledPartsSnapshot: null,
         servoTargetAngles: {},
         servoAngles: {},
         sensorDistances: {},
         batteryLevel: 100,
+        harmonicMass: 1.0,
+        pendulumLength: 2.0,
+        springStiffness: 18.0,
+        springDamping: 0.25,
+        sourceVoltage: 10.0,
+        r1Ohms: 100,
+        r2Ohms: 200,
+        r3Ohms: 150,
+        rVarOhms: 220,
+        rxOhms: 300,
+        laserYawDeg: 0,
+        laserPitchDeg: 0,
+        opticalElementYawDeg: 0,
+        refractiveIndex: 1.5,
+        lensFocalLength: 1.8,
         rigidBodyRefs: {},
         activeSnapTarget: null,
         activeDraftWire: null,
@@ -1939,6 +2336,7 @@ export const useSimulationStore = create<SimulationState>()((set, get) => ({
         assembledPartsSnapshot: null,
         workspaceParts: resolvedParts,
         simulationStatus: 'idle',
+        isPaused: false,
         challengeStatus: 'idle',
         obstacleHits: 0,
         simulationStartedAt: null,
@@ -1961,6 +2359,7 @@ export const useSimulationStore = create<SimulationState>()((set, get) => ({
       setPartDragging(part.id, false);
     }
     const {
+      activeLabId,
       activeBlueprintId,
       theme,
       wiringMode,
@@ -1970,9 +2369,12 @@ export const useSimulationStore = create<SimulationState>()((set, get) => ({
       readOnly,
       zeroCollisionMode,
       performanceMode,
+      timeScale,
+      gravity,
     } = get();
     set({
       ...createInitialData(activeBlueprintId),
+      activeLabId,
       theme,
       wiringMode,
       viewMode,
@@ -1981,6 +2383,8 @@ export const useSimulationStore = create<SimulationState>()((set, get) => ({
       readOnly,
       zeroCollisionMode,
       performanceMode,
+      timeScale,
+      gravity,
     });
   },
 }));

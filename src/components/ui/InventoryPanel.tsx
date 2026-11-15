@@ -1,6 +1,27 @@
 'use client';
 
-import { Box, Cable, Cpu, Crosshair, Flag, Moon, Radar, RotateCcw, Sun } from 'lucide-react';
+import {
+  Activity,
+  Box,
+  Cable,
+  Circle,
+  Cpu,
+  Crosshair,
+  Disc,
+  Flag,
+  Gauge,
+  Moon,
+  Radar,
+  RotateCcw,
+  Scale,
+  Sliders,
+  Sparkles,
+  Sun,
+  TrendingUp,
+  Zap,
+} from 'lucide-react';
+import { getLabBlueprint } from '@/lib/blueprints/blueprintRegistry';
+import { PART_CATALOG } from '@/lib/constants/hardwareCatalog';
 import { useSimulationStore } from '@/store/useSimulationStore';
 import type { PartType } from '@/types/simulator';
 
@@ -13,6 +34,40 @@ function PartIcon({ type }: { type: PartType }) {
   }
   if (type === 'TARGET_ZONE') {
     return <Flag className="h-4 w-4 shrink-0" />;
+  }
+  if (type === 'physics_inclined_ramp') {
+    return <TrendingUp className="h-4 w-4 shrink-0" />;
+  }
+  if (type === 'physics_solid_sphere' || type === 'physics_collision_puck') {
+    return <Circle className="h-4 w-4 shrink-0" />;
+  }
+  if (type === 'physics_solid_cylinder' || type === 'physics_hollow_cylinder') {
+    return <Disc className="h-4 w-4 shrink-0" />;
+  }
+  if (type === 'physics_seesaw_beam') {
+    return <Scale className="h-4 w-4 shrink-0" />;
+  }
+  if (type === 'pivot_anchor' || type === 'pendulum_bob' || type === 'helical_spring_mass') {
+    return <Activity className="h-4 w-4 shrink-0" />;
+  }
+  if (type === 'dc_power_supply' || type === 'resistor_component') {
+    return <Zap className="h-4 w-4 shrink-0" />;
+  }
+  if (type === 'potentiometer_rheostat') {
+    return <Sliders className="h-4 w-4 shrink-0" />;
+  }
+  if (type === 'galvanometer_ammeter') {
+    return <Gauge className="h-4 w-4 shrink-0" />;
+  }
+  if (
+    type === 'laser_emitter' ||
+    type === 'plane_mirror' ||
+    type === 'convex_lens' ||
+    type === 'concave_lens' ||
+    type === 'glass_prism' ||
+    type === 'optical_target_screen'
+  ) {
+    return <Sparkles className="h-4 w-4 shrink-0" />;
   }
   return <Cpu className="h-4 w-4 shrink-0" />;
 }
@@ -27,6 +82,7 @@ export default function InventoryPanel({
   readOnly: readOnlyProp,
 }: InventoryPanelProps = {}) {
   const inventory = useSimulationStore((state) => state.inventory);
+  const activeLabId = useSimulationStore((state) => state.activeLabId);
   const storeAllowedParts = useSimulationStore((state) => state.allowedParts);
   const storeReadOnly = useSimulationStore((state) => state.readOnly);
   const workspacePartsCount = useSimulationStore((state) => state.workspaceParts.length);
@@ -39,18 +95,24 @@ export default function InventoryPanel({
   const resetPositions = useSimulationStore((state) => state.resetPositions);
   const resetWorkspace = useSimulationStore((state) => state.resetWorkspace);
 
+  const activeLab = getLabBlueprint(activeLabId);
+  const labUiConfig = activeLab.uiConfig;
   const effectiveAllowedParts = allowedPartsProp ?? storeAllowedParts;
   const isReadOnly = readOnlyProp ?? storeReadOnly;
+  const labFilteredInventory = inventory.filter((item) => {
+    const category = PART_CATALOG[item.type]?.category;
+    return category === activeLab.subject || category === 'shared';
+  });
   const visibleInventory = effectiveAllowedParts
-    ? inventory.filter((item) => effectiveAllowedParts.includes(item.type))
-    : inventory;
+    ? labFilteredInventory.filter((item) => effectiveAllowedParts.includes(item.type))
+    : labFilteredInventory;
   const isIdle = simulationStatus === 'idle';
   const canEditAssembly = isIdle && !isReadOnly;
 
   return (
     <aside
       aria-label="Part Inventory"
-      className="absolute top-4 left-4 z-10 w-72 rounded-xl border border-[#827148]/30 bg-[#FFEED6]/95 p-4 text-[#827148] shadow-xl backdrop-blur-sm"
+      className="absolute top-4 left-4 z-10 max-h-[calc(100vh-32px)] w-72 overflow-y-auto rounded-xl border border-[#827148]/30 bg-[#FFEED6]/95 p-4 text-[#827148] shadow-xl backdrop-blur-sm"
     >
       <div className="mb-3 flex items-center justify-between border-b border-[#827148]/20 pb-2.5">
         <div>
@@ -92,42 +154,44 @@ export default function InventoryPanel({
         </div>
       </div>
 
-      <div className="mb-3 flex items-center justify-between gap-2 rounded-lg border border-[#827148]/20 bg-[#827148]/10 px-2.5 py-1.5">
-        <span className="flex items-center gap-1.5 text-[11px] font-bold tracking-wide uppercase">
-          <Cable className="h-3.5 w-3.5 shrink-0" />
-          Wiring
-        </span>
-        <div role="group" aria-label="Wiring Mode" className="flex items-center gap-1">
-          <button
-            type="button"
-            onClick={() => setWiringMode('3-pin')}
-            disabled={!canEditAssembly}
-            aria-pressed={wiringMode === '3-pin'}
-            title="3-Pin Realistic Wiring (PWM + 5V + GND)"
-            className={`rounded-md px-2 py-0.5 text-[11px] font-bold transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
-              wiringMode === '3-pin'
-                ? 'bg-[#827148] text-[#FFEED6] shadow-sm'
-                : 'bg-[#FFEED6] text-[#827148] hover:bg-[#A5AF79]/40'
-            }`}
-          >
-            3-Pin
-          </button>
-          <button
-            type="button"
-            onClick={() => setWiringMode('1-wire')}
-            disabled={!canEditAssembly}
-            aria-pressed={wiringMode === '1-wire'}
-            title="1-Wire Signal Shield (PWM only)"
-            className={`rounded-md px-2 py-0.5 text-[11px] font-bold transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
-              wiringMode === '1-wire'
-                ? 'bg-[#827148] text-[#FFEED6] shadow-sm'
-                : 'bg-[#FFEED6] text-[#827148] hover:bg-[#A5AF79]/40'
-            }`}
-          >
-            1-Wire
-          </button>
+      {labUiConfig.showWiringTools && (
+        <div className="mb-3 flex items-center justify-between gap-2 rounded-lg border border-[#827148]/20 bg-[#827148]/10 px-2.5 py-1.5">
+          <span className="flex items-center gap-1.5 text-[11px] font-bold tracking-wide uppercase">
+            <Cable className="h-3.5 w-3.5 shrink-0" />
+            Wiring
+          </span>
+          <div role="group" aria-label="Wiring Mode" className="flex items-center gap-1">
+            <button
+              type="button"
+              onClick={() => setWiringMode('3-pin')}
+              disabled={!canEditAssembly}
+              aria-pressed={wiringMode === '3-pin'}
+              title="3-Pin Realistic Wiring (PWM + 5V + GND)"
+              className={`rounded-md px-2 py-0.5 text-[11px] font-bold transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
+                wiringMode === '3-pin'
+                  ? 'bg-[#827148] text-[#FFEED6] shadow-sm'
+                  : 'bg-[#FFEED6] text-[#827148] hover:bg-[#A5AF79]/40'
+              }`}
+            >
+              3-Pin
+            </button>
+            <button
+              type="button"
+              onClick={() => setWiringMode('1-wire')}
+              disabled={!canEditAssembly}
+              aria-pressed={wiringMode === '1-wire'}
+              title="1-Wire Signal Shield (PWM only)"
+              className={`rounded-md px-2 py-0.5 text-[11px] font-bold transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
+                wiringMode === '1-wire'
+                  ? 'bg-[#827148] text-[#FFEED6] shadow-sm'
+                  : 'bg-[#FFEED6] text-[#827148] hover:bg-[#A5AF79]/40'
+              }`}
+            >
+              1-Wire
+            </button>
+          </div>
         </div>
-      </div>
+      )}
 
       <div className="flex flex-col gap-2">
         {visibleInventory.map((item) => {
