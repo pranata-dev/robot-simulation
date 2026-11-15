@@ -9,6 +9,7 @@ import {
   eulerToQuaternionTuple,
   syncRigidBodyToWorldTransform,
 } from '@/lib/physics/jointConstraints';
+import { applyRollingSolidMassProperties } from '@/lib/physics/rampGeometry';
 import { isValidRigidBody } from '@/lib/physics/servoMotorControl';
 import { useSimulationStore } from '@/store/useSimulationStore';
 import type { PartType, SimulationStatus, Vector3Tuple } from '@/types/simulator';
@@ -24,6 +25,7 @@ interface UsePartDragAndSyncOptions {
   partType: PartType;
   position: Vector3Tuple;
   rotation: Vector3Tuple;
+  initialVelocity?: Vector3Tuple;
   attachedTo?: string;
   enableSnapping: boolean;
   simulationStatus: SimulationStatus;
@@ -41,6 +43,7 @@ export function usePartDragAndSync({
   partType,
   position,
   rotation,
+  initialVelocity,
   attachedTo,
   enableSnapping,
   simulationStatus,
@@ -119,6 +122,14 @@ export function usePartDragAndSync({
       try {
         // Rapier skips collider mass aggregation while kinematicPosition; recompute once dynamic.
         rigidBodyRef.current.recomputeMassPropertiesFromColliders();
+        applyRollingSolidMassProperties(
+          { type: partType, initialVelocity },
+          rigidBodyRef.current,
+          {
+            applyInitialVelocity: true,
+            launchSpeed: useSimulationStore.getState().launchSpeed,
+          },
+        );
         rigidBodyRef.current.wakeUp();
       } catch {
         // Ignore stale RigidBody wake-up during scene reset.
@@ -137,7 +148,7 @@ export function usePartDragAndSync({
     } catch {
       // Ignore Rapier world teardown while resetting scene bodies.
     }
-  }, [id, isDragEnabled, position, resetNonce, rigidBodyRef, rotation, scene, simulationStatus, world]);
+  }, [id, initialVelocity, isDragEnabled, partType, position, resetNonce, rigidBodyRef, rotation, scene, simulationStatus, world]);
 
   useEffect(() => {
     return () => {

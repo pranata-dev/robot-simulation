@@ -22,7 +22,7 @@ import {
 import type { ActiveCollisionTypes, InteractionGroups } from '@dimforge/rapier3d-compat';
 import PartSelectionOverlay from '@/components/canvas/parts/shared/PartSelectionOverlay';
 import { usePartDragAndSync } from '@/hooks/usePartDragAndSync';
-import { BATTERY_PACK_MASS } from '@/lib/constants/hardwareCatalog';
+import { BATTERY_PACK_MASS, PART_CATALOG } from '@/lib/constants/hardwareCatalog';
 import { eulerToQuaternionTuple } from '@/lib/physics/jointConstraints';
 import { useSimulationStore } from '@/store/useSimulationStore';
 import type { PartType, Vector3Tuple } from '@/types/simulator';
@@ -32,6 +32,7 @@ interface DraggableRigidPartProps {
   partType: PartType;
   position: Vector3Tuple;
   rotation?: Vector3Tuple;
+  initialVelocity?: Vector3Tuple;
   attachedTo?: string;
   enableSnapping?: boolean;
   colliders?: RigidBodyAutoCollider | false;
@@ -68,6 +69,7 @@ export default function DraggableRigidPart({
   partType,
   position,
   rotation = DEFAULT_ROTATION,
+  initialVelocity,
   attachedTo,
   enableSnapping = false,
   colliders = false,
@@ -115,13 +117,12 @@ export default function DraggableRigidPart({
     [id, partType, userData],
   );
 
-  const resolvedCollisionGroups =
-    partType === 'BATTERY_2S'
+  const collisionLayer = PART_CATALOG[partType]?.collisionLayer ?? 'free_body';
+  const defaultCollisionGroups =
+    collisionLayer === 'robot_part'
       ? interactionGroups(1, [0])
-      : (collisionGroups ??
-        (partType === 'OBSTACLE_BLOCK' || partType === 'TARGET_ZONE'
-          ? interactionGroups(0, [0, 1])
-          : interactionGroups(1, [0])));
+      : interactionGroups(0, [0, 1]);
+  const resolvedCollisionGroups = collisionGroups ?? defaultCollisionGroups;
   const resolvedMass = partType === 'BATTERY_2S' ? BATTERY_PACK_MASS : mass;
   const resolvedCanSleep = canSleep ?? false;
 
@@ -130,6 +131,7 @@ export default function DraggableRigidPart({
     partType,
     position,
     rotation,
+    initialVelocity,
     attachedTo,
     enableSnapping,
     simulationStatus,
@@ -148,8 +150,7 @@ export default function DraggableRigidPart({
   );
 
   const isPlayingChassis = simulationStatus === 'playing' && partType === 'CHASSIS_BASE';
-  const resolvedRestitution =
-    partType === 'OBSTACLE_BLOCK' || partType === 'TARGET_ZONE' ? restitution : 0;
+  const resolvedRestitution = collisionLayer === 'robot_part' ? 0 : restitution;
   const resolvedLinearDamping = isPlayingChassis
     ? CHASSIS_LINEAR_DAMPING
     : linearDamping;

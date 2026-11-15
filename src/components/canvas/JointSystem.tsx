@@ -8,6 +8,7 @@ import {
   useFixedJoint,
   useRapier,
   useRevoluteJoint,
+  useSphericalJoint,
 } from '@react-three/rapier';
 import { PART_CATALOG } from '@/lib/constants/hardwareCatalog';
 import {
@@ -15,6 +16,7 @@ import {
   resolveJointConstraintSpec,
   syncRigidBodyToWorldTransform,
 } from '@/lib/physics/jointConstraints';
+import { applyRollingSolidMassProperties } from '@/lib/physics/rampGeometry';
 import {
   clampServoAngleDeg,
   isValidImpulseJoint,
@@ -46,6 +48,7 @@ function PreJointPoseSync({ workspaceParts, rigidBodyRefs }: PreJointPoseSyncPro
       return;
     }
     didSyncRef.current = true;
+    const launchSpeed = useSimulationStore.getState().launchSpeed;
     for (const part of workspaceParts) {
       const body = rigidBodyRefs[part.id]?.current;
       syncRigidBodyToWorldTransform(body, part.position, part.rotation);
@@ -53,6 +56,10 @@ function PreJointPoseSync({ workspaceParts, rigidBodyRefs }: PreJointPoseSyncPro
         try {
           // Ensure dynamic mass & inertia reflect collider masses before joints attach.
           body.recomputeMassPropertiesFromColliders();
+          applyRollingSolidMassProperties(part, body, {
+            applyInitialVelocity: true,
+            launchSpeed,
+          });
           body.wakeUp();
         } catch {
           // Ignore stale RigidBody updates during scene teardown.
@@ -154,6 +161,7 @@ function RevoluteMotorJoint({
     if (!isRunning || !revoluteJoint) return;
 
     const storeState = useSimulationStore.getState();
+    if (storeState.isPaused) return;
     const physicalAngleRad = measureRevoluteJointAngleRad(parentRef.current, childRef.current, axis);
     if (storeState.batteryLevel <= 0) {
       releaseDepletedServoMotor({
@@ -168,7 +176,7 @@ function RevoluteMotorJoint({
       return;
     }
 
-    const clampedDelta = Math.min(Math.max(delta, 0), 0.05);
+    const clampedDelta = Math.min(Math.max(delta, 0), 0.05) * storeState.timeScale;
     const targetDeg = clampServoAngleDeg(storeState.servoTargetAngles[servoId] ?? 0);
     const prevAngleRad = currentAngleRadRef.current;
     const nextAngleRad = stepServoMotorSlewAndTraction({
@@ -202,8 +210,114 @@ function RevoluteMotorJoint({
   return null;
 }
 
+interface SphericalPendulumJointProps {
+  parentRef: RefObject<RapierRigidBody | null>;
+  childRef: RefObject<RapierRigidBody | null>;
+  anchorA: Vector3Tuple;
+  anchorB: Vector3Tuple;
+}
+
+function SphericalPendulumJoint({
+  parentRef,
+  childRef,
+  anchorA,
+  anchorB,
+}: SphericalPendulumJointProps) {
+  const isRunning = useSimulationStore((state) => state.simulationStatus === 'playing');
+  useSphericalJoint(parentRef as NonNullBodyRef, childRef as NonNullBodyRef, [
+    anchorA,
+    anchorB,
+  ]);
+
+  useFrame(() => {
+    if (!isRunning) return;
+    const storeState = useSimulationStore.getState();
+    if (storeState.isPaused) return;
+    const childBody = childRef.current;
+    if (!childBody) return;
+    try {
+      childBody.wakeUp();
+      const vel = childBody.linvel();
+      const damping = storeState.springDamping;
+      const massRatio = childBody.mass() / Math.max(0.2, storeState.harmonicMass);
+      childBody.resetForces(true);
+      if (damping > 0) {
+        childBody.addForce(
+          {
+            x: -damping * vel.x * massRatio,
+            y: -damping * vel.y * massRatio,
+            z: -damping * vel.z * massRatio,
+          },
+          true,
+        );
+      }
+    } catch {
+      // Ignore disposed body handles during scene reset
+    }
+  });
+
+  return null;
+}
+
+interface SpringOscillatorJointProps {
+  parentRef: RefObject<RapierRigidBody | null>;
+  childRef: RefObject<RapierRigidBody | null>;
+  anchorA: Vector3Tuple;
+  restLength: number;
+}
+
+function SpringOscillatorJoint({
+  parentRef,
+  childRef,
+  anchorA,
+  restLength,
+}: SpringOscillatorJointProps) {
+  const isRunning = useSimulationStore((state) => state.simulationStatus === 'playing');
+
+  useFrame(() => {
+    if (!isRunning) return;
+    const storeState = useSimulationStore.getState();
+    if (storeState.isPaused) return;
+    const parentBody = parentRef.current;
+    const childBody = childRef.current;
+    if (!parentBody || !childBody) return;
+
+    try {
+      const pPos = parentBody.translation();
+      const cPos = childBody.translation();
+      const vel = childBody.linvel();
+
+      const anchorX = pPos.x + anchorA[0];
+      const anchorY = pPos.y + anchorA[1];
+      const anchorZ = pPos.z + anchorA[2];
+      const restY = anchorY - restLength;
+
+      const k = storeState.springStiffness;
+      const c = storeState.springDamping;
+      const massRatio = childBody.mass() / Math.max(0.2, storeState.harmonicMass);
+
+      const dx = cPos.x - anchorX;
+      const dy = cPos.y - restY;
+      const dz = cPos.z - anchorZ;
+
+      const fy = (-k * dy - c * vel.y) * massRatio;
+      const fx = (-80 * dx - 6 * vel.x) * massRatio;
+      const fz = (-80 * dz - 6 * vel.z) * massRatio;
+
+      childBody.resetForces(true);
+      childBody.addForce({ x: fx, y: fy, z: fz }, true);
+      childBody.setAngvel({ x: 0, y: 0, z: 0 }, true);
+      childBody.wakeUp();
+    } catch {
+      // Ignore disposed body handles during scene reset
+    }
+  });
+
+  return null;
+}
+
 /**
- * Instantiates Rapier Fixed and Revolute impulse joints across all snapped workspaceParts
+ * Instantiates Rapier Fixed, Revolute, Spherical, and Spring impulse joints across all snapped workspaceParts
  * strictly during active simulation playback after RigidBody poses match snapLogic transforms.
  */
 export default function JointSystem() {
@@ -227,7 +341,7 @@ export default function JointSystem() {
     <>
       <PreJointPoseSync workspaceParts={workspaceParts} rigidBodyRefs={rigidBodyRefs} />
       {workspaceParts.map((child) => {
-        if (!child.attachedTo || !child.socketId) return null;
+        if (!child.attachedTo) return null;
 
         const parent = partsById.get(child.attachedTo);
         if (!parent) return null;
@@ -238,6 +352,30 @@ export default function JointSystem() {
 
         const spec = resolveJointConstraintSpec(parent, child);
         if (!spec) return null;
+
+        if (spec.kind === 'SPHERICAL') {
+          return (
+            <SphericalPendulumJoint
+              key={spec.key}
+              parentRef={parentRef}
+              childRef={childRef}
+              anchorA={spec.anchorA}
+              anchorB={spec.anchorB}
+            />
+          );
+        }
+
+        if (spec.kind === 'SPRING') {
+          return (
+            <SpringOscillatorJoint
+              key={spec.key}
+              parentRef={parentRef}
+              childRef={childRef}
+              anchorA={spec.anchorA}
+              restLength={spec.restLength}
+            />
+          );
+        }
 
         if (spec.kind === 'REVOLUTE') {
           const chassisId = parent.attachedTo;

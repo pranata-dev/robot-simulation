@@ -110,7 +110,7 @@ function UltrasonicSensorProxy({
   }, [isPlaying]);
 
   useFrame(() => {
-    if (!isPlaying) return;
+    if (!isPlaying || useSimulationStore.getState().isPaused) return;
     const rb = rigidBodyRef.current;
     if (!rb) return;
 

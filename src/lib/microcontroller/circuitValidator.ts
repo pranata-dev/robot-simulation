@@ -1,4 +1,8 @@
 import { findPinDefinition } from '@/lib/constants/socketRegistry';
+import {
+  type DcSolverParameters,
+  solveDcCircuitMna,
+} from '@/lib/microcontroller/dcCircuitSolver';
 import type {
   CircuitDiagnosticIssue,
   CircuitFaultKind,
@@ -163,6 +167,7 @@ export function validateWiringTopology(
   workspaceParts: readonly WorkspacePart[],
   wires: readonly WireConnection[],
   wiringMode: WiringMode = '3-pin',
+  dcParams?: DcSolverParameters,
 ): WiringValidationResult {
   const partsById = new Map(workspaceParts.map((part) => [part.id, part]));
   const { netByKey, nets } = buildElectricalNets(partsById, wires, wiringMode);
@@ -340,6 +345,64 @@ export function validateWiringTopology(
   const pinToServoIds: Partial<Record<PinId, readonly string[]>> = {};
   for (const [pinId, servoSet] of pinToServoIdSets.entries()) {
     pinToServoIds[pinId] = Array.from(servoSet);
+  }
+
+  const dcSupply = workspaceParts.find((part) => part.type === 'dc_power_supply');
+  if (dcSupply) {
+    const mna = solveDcCircuitMna(
+      workspaceParts,
+      wires,
+      dcParams ?? {
+        sourceVoltage: 10,
+        r1Ohms: 100,
+        r2Ohms: 200,
+        r3Ohms: 150,
+        rVarOhms: 220,
+        rxOhms: 300,
+      },
+    );
+    if (mna.hasShortCircuit && !hasShortCircuit) {
+      hasShortCircuit = true;
+      const posKey = makePinNodeKey(dcSupply.id, 'DC_POS');
+      const negKey = makePinNodeKey(dcSupply.id, 'DC_NEG');
+      faultyPinKeys[posKey] = 'SHORT_CIRCUIT';
+      faultyPinKeys[negKey] = 'SHORT_CIRCUIT';
+      issues.push({
+        id: 'dc-short-circuit',
+        kind: 'SHORT_CIRCUIT',
+        message: mna.diagnostics[0] ?? 'Low-impedance short circuit across DC Power Supply.',
+        pinKeys: [posKey, negKey],
+      });
+    }
+    if (mna.hasOpenBranch) {
+      const wiredSet = new Set<string>();
+      for (const wire of wires) {
+        wiredSet.add(makePinNodeKey(wire.fromPartId, wire.fromPinId));
+        wiredSet.add(makePinNodeKey(wire.toPartId, wire.toPinId));
+      }
+      const openKeys: PinNodeKey[] = [];
+      for (const part of workspaceParts) {
+        let terminalPins: PinId[] = [];
+        if (part.type === 'dc_power_supply') terminalPins = ['DC_POS', 'DC_NEG'];
+        else if (part.type === 'resistor_component') terminalPins = ['RES_1', 'RES_2'];
+        else if (part.type === 'potentiometer_rheostat') terminalPins = ['POT_1', 'POT_2'];
+        else if (part.type === 'galvanometer_ammeter') terminalPins = ['GALV_POS', 'GALV_NEG'];
+        for (const pId of terminalPins) {
+          const k = makePinNodeKey(part.id, pId);
+          if (!wiredSet.has(k)) {
+            addFaultIfUnset(faultyPinKeys, k, 'OPEN_BRANCH');
+            openKeys.push(k);
+          }
+        }
+      }
+      issues.push({
+        id: 'dc-open-branch',
+        kind: 'OPEN_BRANCH',
+        message: mna.diagnostics.find((d) => d.startsWith('Open branch') || d.includes('not wired')) ??
+          'Open branch detected: one or more circuit terminals are unconnected.',
+        pinKeys: openKeys,
+      });
+    }
   }
 
   return {

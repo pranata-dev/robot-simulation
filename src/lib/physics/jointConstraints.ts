@@ -40,6 +40,20 @@ export type ResolvedJointConstraint =
       anchorB: Vector3Tuple;
       axis: Vector3Tuple;
       initialAngleRad: number;
+    }
+  | {
+      kind: 'SPHERICAL';
+      key: string;
+      socketId: SocketId;
+      anchorA: Vector3Tuple;
+      anchorB: Vector3Tuple;
+    }
+  | {
+      kind: 'SPRING';
+      key: string;
+      socketId: SocketId;
+      anchorA: Vector3Tuple;
+      restLength: number;
     };
 
 /**
@@ -100,16 +114,10 @@ export function resolveJointConstraintSpec(
   parent: WorkspacePart,
   child: WorkspacePart,
 ): ResolvedJointConstraint | null {
-  if (!child.attachedTo || !child.socketId || child.attachedTo !== parent.id) {
+  if (!child.attachedTo || child.attachedTo !== parent.id) {
     return null;
   }
 
-  const socket = getSocketsForPart(parent.type).find((entry) => entry.id === child.socketId);
-  if (!socket) {
-    return null;
-  }
-
-  const key = `${child.id}:${parent.id}:${socket.id}`;
   const parentWorldPos = new THREE.Vector3(...parent.position);
   const childWorldPos = new THREE.Vector3(...child.position);
   const parentWorldQuat = new THREE.Quaternion().setFromEuler(
@@ -119,6 +127,44 @@ export function resolveJointConstraintSpec(
     new THREE.Euler(child.rotation[0], child.rotation[1], child.rotation[2], 'XYZ'),
   );
   const invParentQuat = parentWorldQuat.clone().invert();
+
+  if (parent.type === 'pivot_anchor') {
+    const anchorA: Vector3Tuple = [0, -0.1, 0];
+    if (child.type === 'pendulum_bob') {
+      const anchorAWorld = parentWorldPos
+        .clone()
+        .add(new THREE.Vector3(anchorA[0], anchorA[1], anchorA[2]).applyQuaternion(parentWorldQuat));
+      const invChildQuat = childWorldQuat.clone().invert();
+      const anchorBVec = anchorAWorld.sub(childWorldPos).applyQuaternion(invChildQuat);
+      return {
+        kind: 'SPHERICAL',
+        key: `${child.id}:${parent.id}:pendulum`,
+        socketId: child.socketId ?? 'socket-harmonic-pivot',
+        anchorA,
+        anchorB: [anchorBVec.x, anchorBVec.y, anchorBVec.z],
+      };
+    }
+    if (child.type === 'helical_spring_mass') {
+      return {
+        kind: 'SPRING',
+        key: `${child.id}:${parent.id}:spring`,
+        socketId: child.socketId ?? 'socket-harmonic-spring',
+        anchorA,
+        restLength: 1.4,
+      };
+    }
+  }
+
+  if (!child.socketId) {
+    return null;
+  }
+
+  const socket = getSocketsForPart(parent.type).find((entry) => entry.id === child.socketId);
+  if (!socket) {
+    return null;
+  }
+
+  const key = `${child.id}:${parent.id}:${socket.id}`;
 
   if (child.type === 'LEG_TIBIA' && parent.type === 'SERVO_MG90S') {
     const hornOffset = socket.position ?? SPIDER_SERVO_HORN_OFFSET;
