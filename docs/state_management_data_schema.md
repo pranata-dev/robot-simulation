@@ -1,3 +1,5 @@
+> **SUPERSEDED:** This legacy document is superseded by [/docs/PRD.md](./PRD.md) and [/AGENTS.md](../AGENTS.md). Always follow the rules in AGENTS.md and docs/PRD.md.
+
 # State Management & Data Schema (Zustand)
 
 Seluruh *state* aplikasi dikelola menggunakan satu *store* terpusat di `src/store/useSimulationStore.ts` menggunakan **Zustand**.

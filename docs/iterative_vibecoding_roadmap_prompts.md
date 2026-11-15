@@ -1,3 +1,5 @@
+> **SUPERSEDED:** This legacy document is superseded by [/docs/PRD.md](./PRD.md) and [/AGENTS.md](../AGENTS.md). Always follow the rules in AGENTS.md and docs/PRD.md.
+
 # Iterative Vibecoding Roadmap & Prompting Guide
 
 **PENTING:** Jangan pernah meminta AI membangun seluruh aplikasi dalam satu *prompt*. Ikuti 5 fase iteratif di bawah ini secara berurutan. Pastikan setiap fase berjalan tanpa *error* di browser sebelum lanjut ke fase berikutnya.

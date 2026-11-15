@@ -1,3 +1,5 @@
+> **SUPERSEDED:** This legacy document is superseded by [/docs/PRD.md](./PRD.md) and [/AGENTS.md](../AGENTS.md). Always follow the rules in AGENTS.md and docs/PRD.md.
+
 # Project Brief: Interactive 3D Physics & Robotics Simulation Lab
 
 ## 1. Product Vision

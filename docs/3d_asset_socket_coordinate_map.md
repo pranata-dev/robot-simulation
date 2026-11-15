@@ -1,3 +1,5 @@
+> **SUPERSEDED:** This legacy document is superseded by [/docs/PRD.md](./PRD.md) and [/AGENTS.md](../AGENTS.md). Always follow the rules in AGENTS.md and docs/PRD.md.
+
 # 3D Asset & Socket Coordinate Map
 
 Dokumen ini adalah referensi spasial mutlak untuk AI saat menyusun posisi komponen, titik *snap* (*sockets*), engsel sendi (*joints*), dan titik pin kabel (*pins*).

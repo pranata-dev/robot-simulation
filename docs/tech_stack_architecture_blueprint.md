@@ -1,3 +1,5 @@
+> **SUPERSEDED:** This legacy document is superseded by [/docs/PRD.md](./PRD.md) and [/AGENTS.md](../AGENTS.md). Always follow the rules in AGENTS.md and docs/PRD.md.
+
 # Tech Stack & Architecture Standards
 
 ## 1. Core Technology Stack
